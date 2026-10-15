@@ -118,9 +118,11 @@ spec:
               [ "$ok" = 1 ]
 
     # Wait for the base backup + binlog archival so a recovery window exists.
+    # Archival runs every 10 minutes and the rolling update that wires PITR
+    # restarts its timer, so allow two cycles.
     - name: recovery-window-available
       timeouts:
-        assert: 12m
+        assert: 25m
       try:
         - assert:
             file: 40-assert.yaml

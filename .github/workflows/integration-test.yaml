@@ -41,7 +41,8 @@ jobs:
   run:
     name: ${{ inputs.suite }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The pitr suite waits on binlog archival, which runs every 10 minutes.
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
