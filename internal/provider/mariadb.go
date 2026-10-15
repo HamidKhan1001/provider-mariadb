@@ -245,6 +245,11 @@ func desiredMariaDB(c *controller.Context) (*mariadbv1alpha1.MariaDB, error) {
 			SemiSyncBootAsReplica: ptr.To(true),
 		}
 		mdb.Spec.Replication.Replica.ReplicaBootstrapFrom = desiredReplicaBootstrapFrom(c)
+		if mdb.Spec.Replication.Replica.ReplicaBootstrapFrom != nil {
+			// Rebuild replicas that break (e.g. the primary purged binary logs
+			// they still need) from a fresh physical backup of the cluster.
+			mdb.Spec.Replication.Replica.ReplicaRecovery = &mariadbv1alpha1.ReplicaRecovery{Enabled: true}
+		}
 	}
 
 	// Standalone routes clients to the general Service (<name>); HA topologies

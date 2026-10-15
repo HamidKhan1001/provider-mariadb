@@ -1,0 +1,16 @@
+# The operator detected the broken replica (error 1236) and rebuilt it from a
+# physical backup of the cluster, and the cluster is Ready again.
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: MariaDB
+metadata:
+  name: test-replication
+spec:
+  replication:
+    replica:
+      recovery:
+        enabled: true
+status:
+  (conditions[?type == 'ReplicaRecovered']):
+    - status: "True"
+  (conditions[?type == 'Ready']):
+    - status: "True"
