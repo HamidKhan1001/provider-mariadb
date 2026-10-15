@@ -143,13 +143,10 @@ func desiredMariaDB(c *controller.Context) (*mariadbv1alpha1.MariaDB, error) {
 	}
 
 	storage := mariadbv1alpha1.Storage{
-		Size:      ptr.To(resource.MustParse("10Gi")),
+		Size:      ptr.To(engineStorageSize(engine)),
 		Ephemeral: ptr.To(false),
 	}
 	if engine.Storage != nil {
-		if !engine.Storage.Size.IsZero() {
-			storage.Size = ptr.To(engine.Storage.Size)
-		}
 		if engine.Storage.StorageClass != nil {
 			storage.StorageClassName = *engine.Storage.StorageClass
 		}
@@ -255,6 +252,15 @@ func desiredMariaDB(c *controller.Context) (*mariadbv1alpha1.MariaDB, error) {
 		mdb.Spec.Service = configureService(engine.Service)
 	}
 	return mdb, nil
+}
+
+// engineStorageSize returns the data volume size requested for the engine, or
+// the provider default.
+func engineStorageSize(engine corev1alpha1.ComponentSpec) resource.Quantity {
+	if engine.Storage != nil && !engine.Storage.Size.IsZero() {
+		return engine.Storage.Size
+	}
+	return resource.MustParse("10Gi")
 }
 
 // resolveEngineImage returns the engine image from the component override, its

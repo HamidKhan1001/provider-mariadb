@@ -1,0 +1,15 @@
+# The downgrade is not applied: the provider fails validation, which blocks the
+# Instance (phase Failed on OpenEverest 2.0.0-dev.4; Ready=False with reason
+# ValidationFailed on later versions), and the MariaDB stays on its version.
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: test-instance
+(status.phase == 'Failed' || length(status.conditions[?type == 'Ready' && reason == 'ValidationFailed'] || `[]`) > `0`): true
+---
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: MariaDB
+metadata:
+  name: test-instance
+spec:
+  image: mariadb:12.3

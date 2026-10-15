@@ -1,0 +1,8 @@
+# Back on the current version, the Instance is no longer blocked.
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: test-instance
+status:
+  phase: Ready
+(length(status.conditions[?type == 'Ready' && reason == 'ValidationFailed'] || `[]`) == `0`): true

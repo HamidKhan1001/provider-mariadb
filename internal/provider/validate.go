@@ -16,6 +16,9 @@ package provider
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 
 	mariadbv1alpha1 "github.com/mariadb-operator/mariadb-operator/v26/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -54,6 +57,11 @@ func ValidateMariaDB(c *controller.Context) error {
 	if err := validateTopology(c); err != nil {
 		l.Error(err, "Topology validation failed", "name", c.Name())
 		return fmt.Errorf("topology validation: %w", err)
+	}
+
+	if err := validateEngineUpdate(c); err != nil {
+		l.Error(err, "Engine update validation failed", "name", c.Name())
+		return fmt.Errorf("engine update validation: %w", err)
 	}
 
 	if err := validateTLS(c); err != nil {
@@ -340,6 +348,123 @@ func validateReplicationScaleOut(c *controller.Context) error {
 			"new replicas are seeded from a physical backup of the cluster staged there",
 		definition.TopologyTypeReplication,
 	)
+}
+
+// validateEngineUpdate rejects engine changes an existing cluster cannot apply.
+// The previous Instance is not available at admission, so the provisioned
+// MariaDB CR is the reference; nothing is checked at creation.
+func validateEngineUpdate(c *controller.Context) error {
+	existing := &mariadbv1alpha1.MariaDB{}
+	if err := c.Get(existing, c.Name()); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get MariaDB: %w", err)
+	}
+	engine := c.Instance().Spec.Components[common.ComponentEngine]
+	if err := validateVersionDowngrade(c, engine, existing); err != nil {
+		return err
+	}
+	return validateStorageUpdate(engine, existing)
+}
+
+// validateVersionDowngrade rejects moving the engine to an older major or minor
+// version: the data directory is upgraded on version changes
+// (mariaDBAutoUpgradeEnabled) and older servers cannot be relied on to read it.
+// Patch-level changes, and images whose tag has no recognizable version, are
+// allowed.
+func validateVersionDowngrade(c *controller.Context, engine corev1alpha1.ComponentSpec, existing *mariadbv1alpha1.MariaDB) error {
+	engine, err := withBundleVersion(c, engine)
+	if err != nil {
+		return err
+	}
+	image, err := resolveEngineImage(c, engine)
+	if err != nil {
+		return err
+	}
+	current, ok := imageMinorVersion(existing.Spec.Image)
+	if !ok {
+		return nil
+	}
+	desired, ok := imageMinorVersion(image)
+	if !ok {
+		return nil
+	}
+	if desired[0] < current[0] || (desired[0] == current[0] && desired[1] < current[1]) {
+		return fmt.Errorf(
+			"downgrading MariaDB from %d.%d to %d.%d is not supported; restore a backup into a new Instance instead",
+			current[0], current[1], desired[0], desired[1],
+		)
+	}
+	return nil
+}
+
+// withBundleVersion fills in the engine version from the Instance's version
+// bundle, as the runtime does before Sync but not before admission, so the
+// image validated is the one Sync will deploy.
+func withBundleVersion(c *controller.Context, engine corev1alpha1.ComponentSpec) (corev1alpha1.ComponentSpec, error) {
+	if engine.Image != "" || engine.Version != "" {
+		return engine, nil
+	}
+	spec, err := c.ProviderSpec()
+	if err != nil {
+		return engine, fmt.Errorf("get provider spec: %w", err)
+	}
+	name := controller.EffectiveVersionBundleName(spec, c.Instance())
+	if name == "" {
+		return engine, nil
+	}
+	bundle, err := controller.ResolveVersionBundle(spec, name)
+	if err != nil {
+		return engine, err
+	}
+	engine.Version = bundle.Components[common.ComponentEngine]
+	return engine, nil
+}
+
+var minorVersionRegexp = regexp.MustCompile(`^(\d+)\.(\d+)`)
+
+// imageMinorVersion extracts the major and minor version from an image tag,
+// e.g. "mariadb:11.4.5-ubi9" -> [11, 4].
+func imageMinorVersion(image string) ([2]int, bool) {
+	image, _, _ = strings.Cut(image, "@")
+	i := strings.LastIndex(image, ":")
+	if i < 0 || strings.Contains(image[i:], "/") {
+		return [2]int{}, false
+	}
+	m := minorVersionRegexp.FindStringSubmatch(image[i+1:])
+	if m == nil {
+		return [2]int{}, false
+	}
+	major, _ := strconv.Atoi(m[1])
+	minor, _ := strconv.Atoi(m[2])
+	return [2]int{major, minor}, true
+}
+
+// validateStorageUpdate rejects storage changes the operator cannot apply: a
+// smaller volume (rejected by the operator, leaving the Instance stuck) and a
+// different StorageClass (silently ignored, as PVCs cannot change class). A
+// class set on an Instance provisioned with the default class is left as is.
+func validateStorageUpdate(engine corev1alpha1.ComponentSpec, existing *mariadbv1alpha1.MariaDB) error {
+	if current := existing.Spec.Storage.Size; current != nil {
+		if desired := engineStorageSize(engine); desired.Cmp(*current) < 0 {
+			return fmt.Errorf(
+				"spec.components.%s.storage.size cannot be decreased from %s to %s",
+				common.ComponentEngine, current.String(), desired.String(),
+			)
+		}
+	}
+	current := existing.Spec.Storage.StorageClassName
+	if engine.Storage == nil || engine.Storage.StorageClass == nil || current == "" {
+		return nil
+	}
+	if desired := *engine.Storage.StorageClass; desired != current {
+		return fmt.Errorf(
+			"spec.components.%s.storage.storageClass cannot be changed on an existing instance (current: %q)",
+			common.ComponentEngine, current,
+		)
+	}
+	return nil
 }
 
 // validateTopologyImmutable rejects switching an existing instance between

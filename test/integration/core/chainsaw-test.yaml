@@ -105,6 +105,41 @@ spec:
                   }
                 }'
 
+    # Downgrading a running Instance to an older MariaDB version is rejected:
+    # its data directory has been upgraded by the newer server. Updates made
+    # outside the OpenEverest API bypass admission, so the provider blocks the
+    # Instance (Ready=False, ValidationFailed) and leaves the cluster untouched.
+    - name: reject-downgrade
+      timeouts:
+        assert: 2m
+      try:
+        - patch:
+            resource:
+              apiVersion: core.openeverest.io/v1alpha1
+              kind: Instance
+              metadata:
+                name: test-instance
+              spec:
+                version: "10.11"
+        - assert:
+            file: 12-assert.yaml
+
+    # Going back to the current version unblocks the Instance.
+    - name: revert-downgrade
+      timeouts:
+        assert: 3m
+      try:
+        - patch:
+            resource:
+              apiVersion: core.openeverest.io/v1alpha1
+              kind: Instance
+              metadata:
+                name: test-instance
+              spec:
+                version: "12.3"
+        - assert:
+            file: 13-assert.yaml
+
     - name: delete-instance
       try:
         - delete:
