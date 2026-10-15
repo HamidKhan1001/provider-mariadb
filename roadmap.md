@@ -1,250 +1,124 @@
 # provider-mariadb Roadmap
 
-Plan to grow `provider-mariadb` from its current single-node baseline to a
-production-capable OpenEverest provider covering HA, backups, PITR, observability,
-transport encryption, external exposure and pod anti-affinity.
+Plan to take `provider-mariadb` from its current feature-complete pre-alpha to a
+provider that can run MariaDB in production on OpenEverest.
 
 Everything below is expressed in terms of the three moving parts:
 
 - **SDK** — `github.com/openeverest/openeverest/v2` (`Instance` API, `provider-runtime/controller`
-  helpers, backup/BackupClass/BackupStorage types).
-- **Operator** — `github.com/mariadb-operator/mariadb-operator/v26` (`MariaDB`, `Backup`,
-  `PhysicalBackup`, `PointInTimeRecovery`, `Restore` CRs).
+  helpers, backup/BackupClass/BackupStorage types, maintenance gating).
+- **Operator** — `github.com/mariadb-operator/mariadb-operator/v26` (`MariaDB`, `MaxScale`,
+  `Backup`, `PhysicalBackup`, `PointInTimeRecovery`, `Restore` CRs). Baseline: **26.10.1**.
 - **Provider** — this repo (`definition/`, `internal/provider/`, `charts/`).
 
+The backlog lives in GitHub issues, labelled `priority/critical`,
+`priority/high` and `priority/nice-to-have`. This document is the summary;
+the issues are the source of truth for scope and acceptance criteria.
+
 ---
 
-## 1. Current state (baseline)
+## 1. Current state
 
-Source of truth: `internal/provider/`, `definition/`.
+Source of truth: `internal/provider/`, `definition/`, [README](README.md#capabilities).
 
-| Capability | Status | Where |
+| Capability | Status | Where / notes |
 |---|---|---|
-| Provisioning (standalone) | ✅ | `mariadb.go` `SyncMariaDB` / `buildInitialMariaDB` |
-| Horizontal / vertical scaling | ✅ | `engine.replicas`, `engine.resources` |
-| Version upgrades / bundles | ✅ | `definition/versions.yaml`, `resolveExporterImage` |
-| Custom `my.cnf` | ✅ | `MariadbParameters.Configuration` → `spec.myCnf` |
-| Persistent storage + expansion | ✅ | `engine.storage.size` → `spec.storage` |
-| Monitoring (Prometheus) | ✅ | `monitoring` component → `spec.metrics` (mysqld-exporter + ServiceMonitor) |
-| Service exposure (ClusterIP/LB/NodePort) | ✅ | `configureService` / `validateService` |
-| Connection details | ✅ | `buildConnectionDetails` (user/pass, LB-aware host) |
-| **HA topologies (Galera/replication)** | ❌ | only `standalone` topology exists |
-| **Backups / restore / PITR** | ❌ | no `BackupProvider` implementation, no BackupClass |
-| **TLS / transport encryption** | ✅ | enabled by default; operator-managed CA is published in connection details |
-| **Anti-affinity / scheduling** | ❌ | `engine.SchedulingPolicy.Affinity` not mapped to the operator |
+| Provisioning — standalone | ✅ | `mariadb.go` `desiredMariaDB` |
+| HA — Galera | ✅ | `galera` topology, odd replicas ≥ 3, soft anti-affinity, operator PDB |
+| HA — async replication | ✅ | `replication` topology, ≥ 2 replicas, `semiSyncBootAsReplica` |
+| Horizontal scaling | ⚠️ | standalone/Galera OK; **replication scale-out fails** ([#94]) |
+| Vertical scaling, storage expansion | ✅ | `engine.resources`, `engine.storage.size` |
+| Version upgrades | ✅ | `versions.yaml` bundles (10.11, 11.4, 11.8, 12.3); `mariaDBAutoUpgradeEnabled`; downgrades not rejected ([#97]) |
+| Custom `my.cnf` | ✅ | engine `configuration` → `spec.myCnf` |
+| Proxy (MaxScale) | ✅ | `proxy` component; failover stays with the operator |
+| Scheduling | ✅ | affinity (no `podAffinity`), nodeSelector, tolerations, topology spread |
+| TLS | ✅ | on by default, opt-in `required`, Galera SST TLS, CA in connection Secret; cert-manager open ([#39]) |
+| Exposure | ✅ | ClusterIP / LoadBalancer / NodePort on the primary (HA) or general Service; read Service open ([#105]) |
+| Monitoring | ✅ | `monitoring` component → mysqld-exporter + ServiceMonitor; discovery label ([#92]), alerts ([#103]) open |
+| Logical backups (on demand + scheduled) | ✅ | `mariadb` BackupClass, `type: logical`, S3 only |
+| Physical backups (on demand + scheduled) | ✅ | `type: physical` (`mariadb-backup`), S3 only |
+| Restore — logical in place | ✅ | `SyncRestore` → operator `Restore` |
+| Restore — new Instance from backup | ⚠️ | physical ✅; **logical source silently ignored** ([#93]) |
+| PITR | ✅ | replication topology only (operator limitation, [#114]) |
+| Maintenance gating / provider upgrades | ❌ | [#95] |
+| Instance deletion cleanup | ⚠️ | PVCs are orphaned ([#96]); backup data never purged ([#100]) |
+| `spec.userSecretRef` | ❌ | [#102] |
+| Backup import / DR from bucket | ❌ | [#101] |
 
-### Requested capabilities → gap summary
+### Delivered phases (history)
 
-| Requested | Gap | Phase |
+| Phase | Scope | Issues / PRs |
 |---|---|---|
-| Single node deployment | none (done) | — |
-| Cluster deployment for HA (start with Galera) | new topology + `spec.galera` wiring | **P2** |
-| Backups + restore to S3 (logical) | `BackupProvider` + BackupClass | **P4** |
-| PITR (regular, not physical) | ⚠️ operator constraint (see §7) | **P5** |
-| Observability with Prometheus | done; optional enhancements | **P6** |
-| Transport encryption (TLS) | enabled by default + CA surfaced in connection details | **P3 (done)** |
-| Expose via LoadBalancer / NodePort | done for standalone; extend to HA services | **P2 / P6** |
-| Anti-affinity | map `engine.SchedulingPolicy.Affinity`, default-on for HA | **P1** |
+| P1 | Pod anti-affinity & scheduling | #42, #86 |
+| P2 | Galera topology | #35 |
+| P2b | Async replication topology | #36, #90 |
+| P3 | TLS / transport encryption | #38 |
+| P4 | Logical + physical backups, schedules, restore | #33, #47, #49, #51 |
+| P5 | Point-in-time recovery (replication) | #34, #50 |
+| P6 | Monitoring, exposure, MaxScale proxy | #7, #28, #37 / #83 |
+| — | Operator 26.10.1, MariaDB 12.3 default, auto-upgrade | #73, #74, #75 (follow-up tests/docs: #78) |
 
 ---
 
-## 2. Phase 1 — Pod anti-affinity & scheduling
+## 2. Production readiness — `priority/critical`
 
-Small, self-contained, and a prerequisite for meaningful HA. Ship first. **✅ Done.**
+Must be closed before the pre-alpha banner can be removed. Ordered by risk.
 
-- The SDK already exposes `ComponentSpec.SchedulingPolicy.Affinity *corev1.Affinity`
-  (`api/core/v1alpha1/instance_types.go`); the provider currently ignores it.
-- The operator exposes `spec.podTemplate.affinity` as `AffinityConfig`
-  (`api/v1alpha1/base_types.go`), a **trimmed** affinity type that models only
-  `NodeAffinity` and `PodAntiAffinity` (no `PodAffinity`), plus a convenience
-  `AntiAffinityEnabled *bool` that spreads pods across nodes.
+| # | Item | Why it blocks production |
+|---|---|---|
+| [#93] | Seeding from a **logical** backup via `dataSource` | Instance comes up empty — silent data loss on restore |
+| [#94] | Replication **scale-out** | Operator needs `replica.bootstrapFrom`; advertised capability broken |
+| [#95] | **Maintenance gating** + `CheckUpgrade` | `autoUpdateDataPlane: true` rolls every cluster on provider upgrade without approval |
+| [#96] | **PVC lifecycle** on deletion | Orphaned volumes; same-name Instance reattaches stale datadir |
+| [#97] | **Validate** unsafe updates | Version downgrade, storage shrink (Instance stuck), storageClass change (ignored) |
+| [#98] | **Replica recovery** (after #94) | Broken replicas stay broken until rebuilt by hand |
+| [#99], [#78] | **Failure-scenario + upgrade tests** | Failover, Galera recovery, scale-out, logical restore, provider upgrade are untested |
 
-**Tasks**
+## 3. Day-2 operations — `priority/high`
 
-- [x] Map `engine.SchedulingPolicy.Affinity` (`corev1.Affinity`) onto `spec.affinity`
-      (`AffinityConfig`) in `SyncMariaDB` — `internal/provider/affinity.go`
-      (`convertAffinity`), applied for both create and update paths.
-- [x] Reject `podAffinity` in `Validate` (`validateAffinity`) — the operator
-      cannot express pod co-location.
-- [x] Leave `AntiAffinityEnabled` unset: the user supplies explicit rules, so
-      the operator's affinity defaulting stays a no-op and doesn't churn the value.
-- [x] Unit tests for the affinity mapping and validation (`affinity_test.go`).
-- [x] Example manifest (`examples/instance-anti-affinity.yaml`) + README capability row.
-- [x] Default anti-affinity on for the HA/Galera topology — done in P2
-      (`defaultGaleraAffinity`, soft/preferred).
+| # | Item |
+|---|---|
+| [#100] | Honour `Backup.deletionPolicy: Delete` (purge S3 data) |
+| [#101] | DR: import existing backups from a BackupStorage (`BackupImporter`) |
+| [#102] | `spec.userSecretRef` initial credentials |
+| [#103], [#92] | Alerting rules (`PrometheusRule`) and ServiceMonitor discovery labels |
+| [#104] | Runbooks: Galera bootstrap (`forceClusterBootstrapInPod`), switchover, suspend, restore |
 
-**Note on template churn** — affinity lives in the pod template; changing it after
-creation triggers a rolling update. It is only written when the user sets it.
+## 4. Good to have — `priority/nice-to-have`
 
+| # | Item |
+|---|---|
+| [#105] | Read-only replica Service + read host in connection details |
+| [#106] | Credential rotation (root + application user) |
+| [#107] | Exact count-based backup retention (today approximated by age) |
+| [#108] | S3 SSE-C encryption for backups and binlogs |
+| [#109] | VolumeSnapshot physical backups |
+| [#110] | Logical restore parameters (database subset) |
+| [#111] | HA tuning parameters (semi-sync, max lag, failover delay, switchover, Galera SST/probes) |
+| [#112] | `timeZone` engine parameter |
+| [#76], [#77] | zstd compression for backups and PITR binlogs |
+| [#39] | cert-manager integration |
+| [#113] | Cross-cluster DR replica (operator multi-cluster topology) |
+| [#114] | PITR on Galera/standalone — **blocked upstream** (`docs/pitr.md`) |
+| [#115] | Refresh mysqld-exporter / MaxScale versions |
 
----
+### Known platform constraints
 
-## 3. Phase 2 — Galera HA topology
-
-The core "cluster deployment for HA" ask. The operator supports Galera natively
-(`spec.galera`, `api/v1alpha1/mariadb_galera_types.go`) with SST, recovery,
-primary/secondary services and a PodDisruptionBudget. **✅ Done.**
-
-**Tasks**
-
-- [x] Add a `galera` topology under `definition/topologies/galera/`
-      (`topology.yaml` + `types.go`), default replicas 3.
-- [x] Add Galera handling in `SyncMariaDB` (`internal/provider/galera.go`):
-      `applyGaleraOverlay` sets `spec.galera.enabled=true` and preserves the
-      operator-defaulted Galera sub-fields across reconciles.
-- [x] Enforce the operator's odd-replica rule (`>= 3`, odd) in `validate.go`
-      (`validateGaleraReplicas`) **and** the topology UI schema (CEL).
-- [x] Default a **soft** (preferred) pod anti-affinity for Galera
-      (`defaultGaleraAffinity`) so nodes are spread without blocking scheduling —
-      closes the deferred P1 item.
-- [x] PodDisruptionBudget: **no action needed** — the operator auto-creates an HA
-      PDB when Galera is enabled (`reconcilePodDisruptionBudget`).
-- [x] Connection host: for Galera, `resolveHost` selects the primary Service
-      (`<name>-primary`); standalone still uses the general Service.
-- [x] Map exposure (`engine.Service`) onto `spec.primaryService` for Galera,
-      `spec.service` for standalone.
-- [x] Topology immutability: `validateTopologyImmutable` rejects standalone ↔
-      galera changes by comparing against the existing MariaDB CR's Galera state.
-- [x] Unit tests (`galera_test.go`) + example (`examples/instance-galera.yaml`)
-      + README topology/capability rows.
-- [x] Integration test (chainsaw) bringing up a 3-node Galera cluster
-      (`test/integration/galera/`), wired as a **separate** CI job
-      (`test-integration-galera` in `ci.yaml`) so it fails independently.
-
-**Deferred:** async `replication` topology (operator marks it alpha — `TopologyTypeReplication`
-already stubbed in `definition/types.go`). Needed later as a prerequisite for operator PITR (§7).
-
+- `BackupStorage` is S3-only in the OpenEverest API; the operator also supports Azure Blob,
+  PVC and VolumeSnapshot storage. Azure support needs a platform API change first.
+- PITR binlog archival is replication-only in mariadb-operator 26.10 (#114).
 
 ---
 
-## 4. Phase 3 — Transport encryption (TLS)
+## 5. Suggested delivery order
 
-The provider enables TLS by default while leaving enforcement opt-in so existing
-username/password clients can migrate without disruption. The operator-generated
-CA is copied into the OpenEverest connection Secret for server verification.
+1. Correctness bugs: #93, #94, #96, #97.
+2. Safety for upgrades: #95, then #78 / #99 test coverage.
+3. Self-healing: #98.
+4. Day-2: #100, #101, #103 + #92, #102, #104.
+5. Nice-to-have items as demand appears.
 
-The operator's TLS support (`api/v1alpha1/mariadb_types.go` `TLS`) can issue and
-mount server/client certs via its own CA or cert-manager, and `TLS.Required`
-controls enforcement.
-
-**Tasks**
-
-- [x] Introduce TLS controls on the engine component under `parameters.tls`,
-      defaulting TLS on with an opt-in `required` selector.
-- [x] Map `enabled`, `required`, and Galera SST encryption to `spec.tls` while
-      keeping username/password authentication available.
-- [x] Decide CA source: operator-generated CA vs cert-manager (`pkg/discovery` gates
-      cert-manager availability in the operator). Start with the operator CA.
-- [x] Extend `ConnectionDetails` / connection Secret to carry the CA cert so
-      consumers can verify the server.
-- [x] Reconcile the TLS toggle in the read-modify-write overlay without churning the
-      pod template every reconcile.
-- [x] Validation + docs; update README (TLS ❌ → ✅).
-
-**Risk:** flipping TLS on/off changes the pod template → rolling restart. Treat as a
-deliberate, user-initiated change.
-
----
-
-## 5. Phase 4 — Logical backups & restore to S3
-
-Implement the SDK `BackupProvider` interface
-(`provider-runtime/controller/interface.go`) with a **ProviderManaged** `BackupClass`,
-following the MongoDB provider as the reference (`provider-percona-server-mongodb/internal/provider/backup.go`).
-
-Operator building blocks:
-- `Backup` CR (`api/v1alpha1/backup_types.go`) — logical `mariadb-dump`, `spec.storage.s3`,
-  `spec.schedule`, `spec.maxRetention`, `spec.compression`.
-- `Restore` CR / `spec.bootstrapFrom` on `MariaDB` — restore path.
-- SDK `Instance.spec.backup` (`InstanceBackupSpec`) — storages, per-storage schedules, PITR flag.
-- SDK `DataSource` — create a new Instance from an existing `Backup`.
-
-**Tasks**
-
-- [ ] Add a `backupclasses/mariadb-dump/` definition (`class.yaml` + `types.go`),
-      `executionMode: ProviderManaged`, `supportedProviders: [mariadb]`, with
-      backup/restore parameter schemas. Mirror the MongoDB layout.
-- [ ] Implement `BackupProvider` on `MariaDBProvider`:
-  - [ ] `SyncBackup` → create/patch an operator `Backup` CR from S3 `BackupStorage`
-        (`c.BackupStorage(name)`), map operator conditions → `BackupExecutionStatus`.
-  - [ ] `SyncRestore` → create an operator `Restore` CR (or `bootstrapFrom`) pointing at
-        the source backup; handle cross-instance restore via `DataSource`.
-  - [ ] `CleanupBackup` / `CleanupRestore` → delete operator CRs, honor finalizers.
-- [ ] Implement `BackupMirror` (`Mirror` + `OperatorBackupType`) so scheduled operator
-      backups surface as `Backup` CRs. **Design note:** the operator models a schedule as
-      a single `Backup` CR with `spec.schedule` (CronJob), not one CR per run — unlike PBM.
-      Decide the mapping: one operator `Backup` per SDK schedule, mirroring produced Jobs/
-      snapshots back into per-run `Backup` CRs.
-- [ ] Wire `spec.backup.storages[].schedules` → operator `Backup.spec.schedule` +
-      `maxRetention` (retention copies vs duration — operator uses a duration).
-- [ ] Register watches/field indexes (`BackupWatcher`, `FieldIndexProvider`).
-- [ ] RBAC for `backups`, `restores` (kubebuilder markers → `make generate` → promote to chart).
-- [ ] Integration tests against MinIO (S3): backup → delete data → restore.
-- [ ] Update README (backups/restore ❌ → ✅).
-
----
-
-## 6. Phase 5 — Point-in-time recovery (PITR)
-
-> ⚠️ **Operator constraint — read before committing to scope.**
-> The operator's `PointInTimeRecovery` CR (`api/v1alpha1/pointintimerecovery_types.go`)
-> **requires a `PhysicalBackupRef` as the base backup** (binlog replay is anchored to a
-> physical base), and per `docs/pitr.md` **binlog archival + PITR are currently only
-> supported on the asynchronous replication topology** — "Galera and standalone will be
-> supported in upcoming releases."
->
-> This conflicts with the request of *"PITR, regular for now to S3, not physical."*
-> There is no logical-backup-based PITR in the operator today.
-
-**Options**
-
-1. **Defer PITR** until the operator supports it on Galera/standalone, ship logical
-   backups (P4) first without PITR. *(Recommended near-term.)*
-2. **Enable physical backups + async replication topology** as the PITR foundation:
-   - [ ] Add `PhysicalBackup` support (`internal/provider`, new backup class or class option).
-   - [x] Add the `replication` topology (P2 deferred item).
-   - [ ] Wire `PointInTimeRecovery` CR (S3 storage, `archiveTimeout`, `strictMode`).
-   - [ ] Map `spec.backup.storages[].pitr.enabled` → `PointInTimeRecovery`, advertise
-         `providerManaged.supportsPITR: true` on the class and enforce
-         `maxPITREnabledStorages`.
-   - [ ] Restore-to-timestamp via `bootstrapFrom.targetRecoveryTime`.
-3. **Track upstream** for logical-backup PITR / standalone+Galera binlog support and
-   revisit.
-
-**Action:** confirm the desired option with stakeholders before implementation. This
-roadmap assumes **P4 ships first (logical backups, no PITR)**, and PITR follows via
-option 2 once physical backups + a replication topology are in place.
-
----
-
-## 7. Phase 6 — Observability & exposure hardening
-
-Both are largely working; this phase closes gaps.
-
-**Observability (Prometheus) — mostly ✅**
-
-- [ ] Optional `PrometheusRule` (alerts) alongside the existing `ServiceMonitor`.
-- [ ] Ship a reference Grafana dashboard.
-- [ ] Ensure metrics work across topologies (per-pod scraping for Galera).
-
-**Exposure — mostly ✅**
-
-- [ ] For HA, expose the **primary** (and optionally **secondary**) Service, not just the
-      general one (tie-in with P2).
-- [ ] Surface NodePort port(s) and LB ingress in connection details consistently across topologies.
-
----
-
-## 8. Suggested delivery order
-
-1. **P1 Anti-affinity** — small, unblocks HA quality.
-2. **P2 Galera HA** — headline "cluster for HA" capability.
-3. **P3 TLS** — transport encryption; independent of HA.
-4. **P4 Logical backups + restore (S3)** — largest net-new subsystem.
-5. **P6 Observability/exposure hardening** — polish, partly parallelizable.
-6. **P5 PITR** — gated on the operator constraint decision (§6); likely last.
-
-## 9. Cross-cutting reminders
+## 6. Cross-cutting reminders
 
 - After any `definition/` or RBAC change: `make generate`, then `make verify`
   (CI fails on uncommitted generated diffs).
@@ -253,6 +127,37 @@ Both are largely working; this phase closes gaps.
   Never apply an object read with `Get`, and keep declaring immutable fields
   (`bootstrapFrom`, `storageClassName`) so the apply never removes them.
 - New spec/params must be optional with safe defaults (backward compatibility).
-- Add a chainsaw integration suite per phase under `test/integration/`.
+- Anything that changes the MariaDB pod template restarts pods: user-initiated
+  changes are fine, provider-initiated ones must go through maintenance gating (#95).
+- Add a chainsaw suite (separate CI job) per capability under `test/integration/`.
 - Follow the MongoDB provider (`provider-percona-server-mongodb/`) for patterns:
-  backup wiring, status mapping, watches, RBAC promotion.
+  backup import, maintenance gating, upgrade preflight, `userSecretRef`, PVC cleanup.
+
+[#39]: https://github.com/openeverest/provider-mariadb/issues/39
+[#76]: https://github.com/openeverest/provider-mariadb/issues/76
+[#77]: https://github.com/openeverest/provider-mariadb/issues/77
+[#78]: https://github.com/openeverest/provider-mariadb/issues/78
+[#92]: https://github.com/openeverest/provider-mariadb/issues/92
+[#93]: https://github.com/openeverest/provider-mariadb/issues/93
+[#94]: https://github.com/openeverest/provider-mariadb/issues/94
+[#95]: https://github.com/openeverest/provider-mariadb/issues/95
+[#96]: https://github.com/openeverest/provider-mariadb/issues/96
+[#97]: https://github.com/openeverest/provider-mariadb/issues/97
+[#98]: https://github.com/openeverest/provider-mariadb/issues/98
+[#99]: https://github.com/openeverest/provider-mariadb/issues/99
+[#100]: https://github.com/openeverest/provider-mariadb/issues/100
+[#101]: https://github.com/openeverest/provider-mariadb/issues/101
+[#102]: https://github.com/openeverest/provider-mariadb/issues/102
+[#103]: https://github.com/openeverest/provider-mariadb/issues/103
+[#104]: https://github.com/openeverest/provider-mariadb/issues/104
+[#105]: https://github.com/openeverest/provider-mariadb/issues/105
+[#106]: https://github.com/openeverest/provider-mariadb/issues/106
+[#107]: https://github.com/openeverest/provider-mariadb/issues/107
+[#108]: https://github.com/openeverest/provider-mariadb/issues/108
+[#109]: https://github.com/openeverest/provider-mariadb/issues/109
+[#110]: https://github.com/openeverest/provider-mariadb/issues/110
+[#111]: https://github.com/openeverest/provider-mariadb/issues/111
+[#112]: https://github.com/openeverest/provider-mariadb/issues/112
+[#113]: https://github.com/openeverest/provider-mariadb/issues/113
+[#114]: https://github.com/openeverest/provider-mariadb/issues/114
+[#115]: https://github.com/openeverest/provider-mariadb/issues/115

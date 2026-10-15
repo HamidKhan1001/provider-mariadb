@@ -48,7 +48,7 @@ manages pods directly — all lifecycle work is delegated to the operator.
 
 | provider-mariadb | OpenEverest | mariadb-operator | Kubernetes |
 |---|---|---|---|
-| `0.1.x` | `>= 2.0.0` | `26.6.x` | `1.30` – `1.34` |
+| `0.1.x` | `>= 2.0.0` | `26.10.x` | `1.30` – `1.34` |
 
 ## Capabilities
 
@@ -58,7 +58,7 @@ provider itself is covered under [Installation](#installation).
 | Capability | Status | Notes |
 |---|---|---|
 | Provisioning | ✅ | |
-| Horizontal scaling | ✅ | `spec.components.engine.replicas` |
+| Horizontal scaling | ⚠️ | `spec.components.engine.replicas`; scaling out the `replication` topology is not supported yet ([#94](https://github.com/openeverest/provider-mariadb/issues/94)) |
 | Vertical scaling (CPU / memory) | ✅ | `spec.components.engine.resources` |
 | Version upgrades | ✅ | of the deployed MariaDB version — change `spec.version`; see [Versions](#versions) |
 | High availability (Galera) | ✅ | `spec.topology.type: galera` — multi-master cluster; odd node count (default 3) |
@@ -77,7 +77,7 @@ Stateful workloads additionally report:
 | Storage expansion | ✅ | when the StorageClass allows volume expansion |
 | Backups (on demand) | ✅ | logical (`mariadb-dump`) or physical (`mariadb-backup`) to S3-compatible storage; strategy selected via the backup `type` parameter |
 | Backups (scheduled) | ✅ | cron schedules per storage via `spec.backup` |
-| Restore | ✅ | logical backups are restored in place; physical backups are restored by seeding a new Instance from `spec.dataSource` |
+| Restore | ✅ | logical backups are restored in place; physical backups are restored by seeding a new Instance from `spec.dataSource` (seeding from a logical backup is not supported yet, [#93](https://github.com/openeverest/provider-mariadb/issues/93)) |
 | Point-in-time recovery | ✅ | binary log archival on the `replication` topology; one storage may enable `pitr`; recover a new Instance to a target time via `spec.dataSource` (`PointInTime`) |
 
 ## Installation
@@ -246,8 +246,9 @@ spec:
 ```
 
 On-demand backups are taken by creating a `Backup` resource that targets the
-same storage and class. Restore a new Instance from an existing backup with
-`spec.dataSource`:
+same storage and class. Restore a new Instance from an existing **physical**
+backup with `spec.dataSource` (logical sources are not supported yet, see
+[#93](https://github.com/openeverest/provider-mariadb/issues/93)):
 
 ```yaml
 spec:
