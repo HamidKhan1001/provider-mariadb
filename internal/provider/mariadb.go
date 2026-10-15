@@ -87,17 +87,17 @@ func SyncMariaDB(c *controller.Context) error {
 	err = c.Get(existing, c.Name())
 	switch {
 	case apierrors.IsNotFound(err):
-		// Physical restore is only possible into a fresh MariaDB via
-		// bootstrapFrom, so it is resolved at creation time only.
-		bootstrap, sourceInstance, err := resolvePhysicalBootstrapFrom(c)
+		// Seeding from spec.dataSource is only possible into a fresh MariaDB
+		// via bootstrapFrom, so it is resolved at creation time only.
+		bootstrap, sourceInstance, err := resolveBootstrapFrom(c)
 		if err != nil {
 			return err
 		}
 		if bootstrap != nil {
-			// The physical backup embeds the source's credentials; copy them so
-			// the operator does not generate mismatched passwords that would
-			// fail the probes and crash-loop the restored Pods.
-			if err := ensurePhysicalRestoreCredentials(c, sourceInstance); err != nil {
+			// The backup embeds the source's credentials; copy them so the
+			// operator does not generate mismatched passwords that would fail
+			// the probes and crash-loop the restored Pods.
+			if err := ensureRestoreCredentials(c, sourceInstance); err != nil {
 				return err
 			}
 		}
@@ -321,6 +321,18 @@ func StatusMariaDB(c *controller.Context) (controller.Status, error) {
 			return controller.Provisioning("Waiting for MariaDB cluster to be created"), nil
 		}
 		return controller.Status{}, fmt.Errorf("get MariaDB: %w", err)
+	}
+
+	// Seeding from spec.dataSource owns the phase until it reaches a terminal
+	// state: a logical restore runs while the MariaDB is already Ready, and the
+	// Instance must not expose connection details for an empty database.
+	if ds := c.GetDataSourceStatus(); ds != nil {
+		if ds.State == controller.DataSourceStateFailed {
+			return controller.Failed(ds.Message), nil
+		}
+		if !ds.Done {
+			return controller.Restoring(ds.Message), nil
+		}
 	}
 
 	// Check the Ready condition.

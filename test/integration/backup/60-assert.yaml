@@ -1,0 +1,13 @@
+# The logical backup completes successfully and the provider records the
+# operator Backup it drove.
+apiVersion: backup.openeverest.io/v1alpha1
+kind: Backup
+metadata:
+  name: logical-backup
+status:
+  state: Succeeded
+---
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: Backup
+metadata:
+  name: logical-backup

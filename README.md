@@ -77,7 +77,7 @@ Stateful workloads additionally report:
 | Storage expansion | ✅ | when the StorageClass allows volume expansion |
 | Backups (on demand) | ✅ | logical (`mariadb-dump`) or physical (`mariadb-backup`) to S3-compatible storage; strategy selected via the backup `type` parameter |
 | Backups (scheduled) | ✅ | cron schedules per storage via `spec.backup` |
-| Restore | ✅ | logical backups are restored in place; physical backups are restored by seeding a new Instance from `spec.dataSource` (seeding from a logical backup is not supported yet, [#93](https://github.com/openeverest/provider-mariadb/issues/93)) |
+| Restore | ✅ | logical backups are restored in place (same Instance only) or into a new Instance via `spec.dataSource`; physical backups are restored by seeding a new Instance from `spec.dataSource` |
 | Point-in-time recovery | ✅ | binary log archival on the `replication` topology; one storage may enable `pitr`; recover a new Instance to a target time via `spec.dataSource` (`PointInTime`) |
 
 ## Installation
@@ -212,7 +212,8 @@ Backups are driven natively by the operator to an S3-compatible object store —
 the provider never runs side-car Jobs. Two strategies are available, selected
 per backup via the `type` parameter:
 
-- **`logical`** — a `mariadb-dump` SQL dump, restored in place.
+- **`logical`** — a `mariadb-dump` SQL dump, restored in place (from a backup of
+  the same Instance) or by seeding a new Instance from `spec.dataSource`.
 - **`physical`** — a `mariadb-backup` data-directory snapshot, restored by
   seeding a new Instance from `spec.dataSource` (in-place restore is not
   supported by the engine for physical backups).
@@ -246,9 +247,8 @@ spec:
 ```
 
 On-demand backups are taken by creating a `Backup` resource that targets the
-same storage and class. Restore a new Instance from an existing **physical**
-backup with `spec.dataSource` (logical sources are not supported yet, see
-[#93](https://github.com/openeverest/provider-mariadb/issues/93)):
+same storage and class. Restore a new Instance from an existing backup (logical
+or physical) with `spec.dataSource`:
 
 ```yaml
 spec:
@@ -260,7 +260,11 @@ spec:
 ```
 
 `spec.dataSource` is immutable once set and requires `spec.backup.enabled: true`
-with at least one storage so the provider can read the source backup.
+with at least one storage so the provider can read the source backup. The new
+Instance reuses the source Instance's credentials, because the backup carries
+its users. It reports the `Restoring` phase until the data is in place: physical
+backups are restored before MariaDB starts, while logical backups are replayed
+once the new cluster is up.
 
 ### Point-in-time recovery
 

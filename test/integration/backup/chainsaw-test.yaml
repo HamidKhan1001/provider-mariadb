@@ -1,14 +1,16 @@
 ---
-# Physical backup & restore suite.
+# Backup & restore suite.
 #
-# End-to-end proof that a physical backup (mariadb BackupClass, parameters.type
-# = physical) can seed a brand-new Instance:
+# End-to-end proof that physical and logical backups (mariadb BackupClass,
+# parameters.type = physical | logical) can seed a brand-new Instance:
 #   1. Deploy SeaweedFS (S3), which pre-creates the backup bucket.
 #   2. Provision a source MariaDB, write a sentinel row.
 #   3. Take an on-demand physical backup to SeaweedFS.
 #   4. Create a new Instance seeded from that backup via spec.dataSource; the
 #      provider wires MariaDB.spec.bootstrapFrom (backupContentType: Physical).
 #   5. Assert the restored cluster comes up Ready and still holds the row.
+#   6. Repeat 3-5 with a logical backup (backupContentType: Logical), which the
+#      operator restores once the new cluster is up.
 #
 # SeaweedFS is deployed into a fixed `seaweedfs` namespace (reused from dev/resources),
 # so the test is self-contained and needs no pre-provisioned storage.
@@ -18,14 +20,15 @@ metadata:
   name: backup
 spec:
   description: |
-    Physical backup of a source Instance to SeaweedFS, then restore into a new
-    Instance via spec.dataSource, verifying the data survives the round-trip.
+    Physical and logical backups of a source Instance to SeaweedFS, each restored
+    into a new Instance via spec.dataSource, verifying the data survives the
+    round-trip.
 
   catch:
     - script:
-        content: kubectl -n $NAMESPACE get instance,mariadb,backup,physicalbackup,pods -o wide
+        content: kubectl -n $NAMESPACE get instance,mariadb,backup,physicalbackup,restore,pods -o wide
     - script:
-        content: kubectl -n $NAMESPACE get backup,physicalbackup,mariadb -o yaml
+        content: kubectl -n $NAMESPACE get backup,physicalbackup,restore,mariadb -o yaml
     - script:
         content: |
           ns=$(kubectl get deploy -A -l app.kubernetes.io/name=provider-mariadb \
@@ -159,13 +162,86 @@ spec:
                   }
                 }'
 
-    - name: delete-instances
+
+    # Free resources before seeding the next Instance.
+    - name: delete-physical-restored
       try:
         - delete:
             ref:
               apiVersion: core.openeverest.io/v1alpha1
               kind: Instance
               name: physical-restored
+        - wait:
+            apiVersion: k8s.mariadb.com/v1alpha1
+            kind: MariaDB
+            name: physical-restored
+            timeout: 3m
+            for:
+              deletion: {}
+
+    # Take a logical backup of the same source and wait for it to complete.
+    - name: take-logical-backup
+      timeouts:
+        assert: 8m
+      try:
+        - apply:
+            file: 60-logical-backup.yaml
+        - assert:
+            file: 60-assert.yaml
+
+    # Seed a brand-new Instance from the logical backup.
+    - name: restore-logical-instance
+      try:
+        - apply:
+            file: 70-logical-restored-instance.yaml
+        - assert:
+            file: 70-assert.yaml
+
+    # Ready (and DataSourceReady) only after the operator applied the dump.
+    - name: logical-restored-running
+      timeouts:
+        assert: 8m
+      try:
+        - assert:
+            file: 71-assert.yaml
+
+    # The sentinel row must be present in the logically restored cluster.
+    - name: verify-logical-data
+      timeouts:
+        exec: 3m
+      try:
+        - script:
+            content: |
+              set -eu
+              kubectl -n "$NAMESPACE" run mariadb-verify-logical \
+                --rm -i --restart=Never \
+                --image=mariadb:12.3 \
+                --overrides='{
+                  "spec": {
+                    "containers": [{
+                      "name": "mariadb-verify-logical",
+                      "image": "mariadb:12.3",
+                      "command": ["sh", "-c"],
+                      "args": ["set -eu; val=$(mariadb -h \"$DB_HOST\" -P \"$DB_PORT\" -u \"$DB_USER\" --ssl-ca=/tls/ca.crt -Nse \"SELECT id FROM everest.restore_probe WHERE id=42;\"); test \"$val\" = \"42\"; echo \"restore probe row present: $val\""],
+                      "env": [
+                        {"name": "DB_HOST", "valueFrom": {"secretKeyRef": {"name": "logical-restored-conn", "key": "host"}}},
+                        {"name": "DB_PORT", "valueFrom": {"secretKeyRef": {"name": "logical-restored-conn", "key": "port"}}},
+                        {"name": "DB_USER", "valueFrom": {"secretKeyRef": {"name": "logical-restored-conn", "key": "username"}}},
+                        {"name": "MYSQL_PWD", "valueFrom": {"secretKeyRef": {"name": "logical-restored-conn", "key": "password"}}}
+                      ],
+                      "volumeMounts": [{"name": "tls", "mountPath": "/tls", "readOnly": true}]
+                    }],
+                    "volumes": [{"name": "tls", "secret": {"secretName": "logical-restored-conn", "items": [{"key": "ca.crt", "path": "ca.crt"}]}}]
+                  }
+                }'
+
+    - name: delete-instances
+      try:
+        - delete:
+            ref:
+              apiVersion: core.openeverest.io/v1alpha1
+              kind: Instance
+              name: logical-restored
         - delete:
             ref:
               apiVersion: core.openeverest.io/v1alpha1

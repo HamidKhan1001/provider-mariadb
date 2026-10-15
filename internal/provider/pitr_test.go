@@ -300,7 +300,7 @@ func TestResolvePointInTimeBootstrapFrom(t *testing.T) {
 		in := instanceSeededFromPITR(backupv1alpha1.RecoveryTargetDate, &date)
 		c := newPITRContext(t, in, sourcePITR)
 
-		bootstrap, sourceInstance, err := resolvePhysicalBootstrapFrom(c)
+		bootstrap, sourceInstance, err := resolveBootstrapFrom(c)
 		require.NoError(t, err)
 		require.NotNil(t, bootstrap)
 		assert.Equal(t, "src", sourceInstance)
@@ -315,7 +315,7 @@ func TestResolvePointInTimeBootstrapFrom(t *testing.T) {
 		in := instanceSeededFromPITR(backupv1alpha1.RecoveryTargetLatest, nil)
 		c := newPITRContext(t, in, sourcePITR)
 
-		bootstrap, _, err := resolvePhysicalBootstrapFrom(c)
+		bootstrap, _, err := resolveBootstrapFrom(c)
 		require.NoError(t, err)
 		require.NotNil(t, bootstrap)
 		assert.Nil(t, bootstrap.TargetRecoveryTime)
@@ -325,7 +325,7 @@ func TestResolvePointInTimeBootstrapFrom(t *testing.T) {
 		in := instanceSeededFromPITR(backupv1alpha1.RecoveryTargetLatest, nil)
 		c := newPITRContext(t, in)
 
-		_, _, err := resolvePhysicalBootstrapFrom(c)
+		_, _, err := resolveBootstrapFrom(c)
 		require.Error(t, err)
 		var waitErr *controller.WaitError
 		assert.ErrorAs(t, err, &waitErr)
@@ -336,7 +336,7 @@ func TestResolvePointInTimeBootstrapFrom(t *testing.T) {
 		in.Spec.DataSource.PointInTime.Source.InstanceRef = nil
 		c := newPITRContext(t, in, sourcePITR)
 
-		_, _, err := resolvePhysicalBootstrapFrom(c)
+		_, _, err := resolveBootstrapFrom(c)
 		require.Error(t, err)
 		var dsErr *controller.DataSourceConfigError
 		assert.ErrorAs(t, err, &dsErr)
@@ -346,7 +346,7 @@ func TestResolvePointInTimeBootstrapFrom(t *testing.T) {
 		in := instanceSeededFromPITR(backupv1alpha1.RecoveryTargetDate, nil)
 		c := newPITRContext(t, in, sourcePITR)
 
-		_, _, err := resolvePhysicalBootstrapFrom(c)
+		_, _, err := resolveBootstrapFrom(c)
 		require.Error(t, err)
 		var dsErr *controller.DataSourceConfigError
 		assert.ErrorAs(t, err, &dsErr)

@@ -90,7 +90,7 @@ func (p *MariaDBProvider) Sync(c *controller.Context) error {
 	if err := SyncPITR(c); err != nil {
 		return err
 	}
-	return syncPhysicalDataSourceStatus(c)
+	return syncDataSourceStatus(c)
 }
 
 // Status reads the MariaDB CR status and translates it to an Instance status.

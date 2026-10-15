@@ -1,0 +1,36 @@
+# A brand-new Instance seeded from the source's logical backup via
+# spec.dataSource. The provider sets MariaDB.spec.bootstrapFrom with the Logical
+# content type, and the operator restores the dump once the cluster is up.
+# backup must be enabled with the same storage the source backup used.
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: logical-restored
+spec:
+  providerRef:
+    name: mariadb
+  dataSource:
+    type: Backup
+    backup:
+      backupRef:
+        name: logical-backup
+  components:
+    engine:
+      type: mariadb
+      replicas: 1
+      resources:
+        limits:
+          cpu: "1"
+          memory: 1G
+        requests:
+          cpu: 250m
+          memory: 512M
+      storage:
+        size: 1Gi
+  backup:
+    enabled: true
+    classRef:
+      name: mariadb
+    storages:
+      - storageRef:
+          name: seaweedfs-s3

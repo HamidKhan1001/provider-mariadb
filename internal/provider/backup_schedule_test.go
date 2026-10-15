@@ -137,6 +137,7 @@ func TestSyncScheduledBackupsCreatesOperatorBackup(t *testing.T) {
 	require.NotNil(t, opBackup.Spec.Schedule)
 	assert.Equal(t, "0 0 * * *", opBackup.Spec.Schedule.Cron)
 	assert.False(t, opBackup.Spec.Schedule.Suspend)
+	assert.Equal(t, []string{"--flush-privileges"}, opBackup.Spec.Args)
 	assert.Equal(t, 4*24*time.Hour, opBackup.Spec.MaxRetention.Duration)
 	assert.Equal(t, "daily", opBackup.Labels[scheduleLabel])
 	require.NotNil(t, opBackup.Spec.InheritMetadata)
