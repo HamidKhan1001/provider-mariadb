@@ -2,18 +2,20 @@
 # Point-in-time recovery suite.
 #
 # End-to-end proof that PITR (async replication topology, a storage with
-# pitr.enabled) can seed a brand-new Instance recovered to the latest
-# archived point:
+# pitr.enabled) can seed a brand-new multi-node Instance recovered to a point
+# in time, i.e. that archived binary logs are actually replayed:
 #   1. Deploy SeaweedFS (S3), which pre-creates the backup bucket.
 #   2. Provision a replication source MariaDB with PITR enabled; the provider
 #      reconciles a PointInTimeRecovery CR + base PhysicalBackup and turns on
 #      binary log archival (MariaDB.spec.pointInTimeRecoveryRef).
-#   3. Write a sentinel row.
-#   4. Wait for the base backup + binlog archival so the recovery window
-#      (instance.status.backup.storages[].pitr) becomes Available.
-#   5. Seed a new Instance via spec.dataSource type PointInTime (recoveryTarget
-#      latest); the provider wires MariaDB.spec.bootstrapFrom.pointInTimeRecoveryRef.
-#   6. Assert the recovered cluster comes up Ready and still holds the row.
+#   3. Write row 42 and wait for the recovery window (base backup + archival).
+#   4. Write row 43, record the server time as the recovery target, write row
+#      44, and wait until binary log archival covers the target.
+#   5. Seed a new 3-node replication Instance via spec.dataSource type
+#      PointInTime (recoveryTarget date); the provider wires
+#      MariaDB.spec.bootstrapFrom.pointInTimeRecoveryRef.
+#   6. Assert the recovered cluster comes up Ready with DataSourceReady, and
+#      every node holds rows 42 and 43 but not 44 (written after the target).
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
@@ -21,8 +23,9 @@ metadata:
 spec:
   description: |
     Point-in-time recovery of a replication source Instance: enable PITR, archive
-    binary logs to SeaweedFS, then recover into a new Instance via spec.dataSource
-    (PointInTime, latest), verifying the data survives the round-trip.
+    binary logs to SeaweedFS, then recover into a new 3-node Instance via
+    spec.dataSource (PointInTime, date), verifying binary logs are replayed up to
+    the target on every node.
 
   catch:
     - script:
@@ -122,24 +125,85 @@ spec:
         - assert:
             file: 40-assert.yaml
 
-    # Recover a brand-new Instance to the latest archived point.
+    # Writes after the base backup, around the recovery target. Only replaying
+    # the archived binary logs can bring back row 43; row 44 is past the target.
+    # Base backups run every 5 minutes, so the writes are timed between one
+    # completed base backup and the next. Times come from the server clock to
+    # avoid runner/cluster skew.
+    - name: write-around-target
+      timeouts:
+        exec: 8m
+      try:
+        - script:
+            content: |
+              set -eu
+              rootpw=$(kubectl -n "$NAMESPACE" get secret everest-secrets-pitr-source-root \
+                -o jsonpath='{.data.root-password}' | base64 -d)
+              primary=$(kubectl -n "$NAMESPACE" get pod -l 'k8s.mariadb.com/role=primary' \
+                -o jsonpath='{.items[0].metadata.name}')
+              sql() {
+                kubectl -n "$NAMESPACE" exec "$primary" -c mariadb -- \
+                  env MYSQL_PWD="$rootpw" mariadb -u root -Nse "$1"
+              }
+              # Wait for 60-240s past a 5-minute boundary (server time).
+              while :; do
+                offset=$(sql "SELECT MOD(UNIX_TIMESTAMP(), 300);")
+                if [ "$offset" -ge 60 ] && [ "$offset" -lt 240 ]; then break; fi
+                sleep 10
+              done
+              sql "INSERT INTO everest.pitr_probe (id) VALUES (43);"
+              sleep 3
+              target=$(sql "SELECT DATE_FORMAT(UTC_TIMESTAMP(), '%Y-%m-%dT%H:%i:%sZ');")
+              sleep 3
+              sql "INSERT INTO everest.pitr_probe (id) VALUES (44); FLUSH BINARY LOGS;"
+              kubectl -n "$NAMESPACE" create configmap pitr-target --from-literal=target="$target"
+              echo "recovery target: $target"
+
+    # Binary logs are archived periodically; wait until the recoverable window
+    # covers the target. Both timestamps are RFC 3339 UTC, so they compare as
+    # strings.
+    - name: target-archived
+      timeouts:
+        exec: 20m
+      try:
+        - script:
+            content: |
+              set -eu
+              target=$(kubectl -n "$NAMESPACE" get configmap pitr-target -o jsonpath='{.data.target}')
+              for attempt in $(seq 1 75); do
+                latest=$(kubectl -n "$NAMESPACE" get instance pitr-source \
+                  -o jsonpath='{.status.backup.storages[0].pitr.latestRestorableTime}')
+                echo "latestRestorableTime=${latest:-<none>} target=${target}"
+                if [ -n "$latest" ] && awk -v a="$latest" -v b="$target" 'BEGIN { exit !(a > b) }'; then
+                  exit 0
+                fi
+                sleep 15
+              done
+              exit 1
+
+    # Recover a brand-new 3-node replication Instance to the target.
     - name: recover-instance
       try:
-        - apply:
-            file: 50-restore-instance.yaml
+        - script:
+            content: |
+              set -eu
+              target=$(kubectl -n "$NAMESPACE" get configmap pitr-target -o jsonpath='{.data.target}')
+              sed "s/__TARGET__/${target}/" 50-restore-instance.yaml | kubectl -n "$NAMESPACE" apply -f -
         - assert:
             file: 50-assert.yaml
 
     - name: recovered-running
       timeouts:
-        assert: 10m
+        assert: 20m
       try:
         - assert:
             file: 51-assert.yaml
 
-    # The sentinel row must be present in the recovered cluster. Read it as root
-    # via the restored pod's local socket (the provider copied the source's root
-    # Secret onto the restored instance). Retry to ride out any post-Ready blip.
+    # Every node must hold the rows up to the target and nothing after it: the
+    # primary proves the replay stopped at the target, the replicas prove they
+    # replicate from the recovered primary. Read as root via each pod's local
+    # socket (the provider copied the source's root Secret onto the restored
+    # instance). Retry to ride out replication catching up.
     - name: verify-data
       timeouts:
         exec: 5m
@@ -149,20 +213,20 @@ spec:
               set -eu
               rootpw=$(kubectl -n "$NAMESPACE" get secret everest-secrets-pitr-restored-root \
                 -o jsonpath='{.data.root-password}' | base64 -d)
-              ok=0
-              for attempt in $(seq 1 12); do
-                out=$(kubectl -n "$NAMESPACE" exec pitr-restored-0 -c mariadb -- \
-                  env MYSQL_PWD="$rootpw" mariadb -u root -Nse \
-                  "SELECT id FROM everest.pitr_probe WHERE id=42;" 2>&1 || true)
-                echo "$out"
-                if [ "$out" = "42" ]; then
-                  echo "pitr probe row present: $out"
-                  ok=1; break
-                fi
-                echo "verify attempt ${attempt}: got '${out}', retrying in 15s..."
-                sleep 15
+              for pod in pitr-restored-0 pitr-restored-1 pitr-restored-2; do
+                ok=0
+                for attempt in $(seq 1 12); do
+                  out=$(kubectl -n "$NAMESPACE" exec "$pod" -c mariadb -- \
+                    env MYSQL_PWD="$rootpw" mariadb -u root -Nse \
+                    "SELECT GROUP_CONCAT(id ORDER BY id) FROM everest.pitr_probe;" 2>&1 || true)
+                  echo "${pod}: ${out}"
+                  if [ "$out" = "42,43" ]; then
+                    ok=1; break
+                  fi
+                  sleep 15
+                done
+                [ "$ok" = 1 ] || { echo "${pod}: expected rows 42,43, got '${out}'"; exit 1; }
               done
-              [ "$ok" = 1 ]
 
     - name: delete-instances
       try:

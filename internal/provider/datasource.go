@@ -239,6 +239,10 @@ func syncDataSourceStatus(c *controller.Context) error {
 	if mdb.Spec.BootstrapFrom == nil {
 		return nil
 	}
+	if mdb.Spec.BootstrapFrom.PointInTimeRecoveryRef != nil {
+		c.SetDataSourceStatus(pointInTimeDataSourceStatus(mdb))
+		return nil
+	}
 
 	switch mdb.Spec.BootstrapFrom.BackupContentType {
 	case mariadbv1alpha1.BackupContentTypePhysical:
@@ -284,6 +288,31 @@ func bootstrapRestoreFailed(c *controller.Context, mdb *mariadbv1alpha1.MariaDB)
 	}
 	state := mapRestoreState(restore.Status.Conditions)
 	return state.State == backupv1alpha1.RestoreStateFailed, state.Message, nil
+}
+
+// pointInTimeDataSourceStatus translates a point-in-time recovery into the
+// runtime's DataSourceStatus. The operator restores the base backup first and
+// replays the archived binary logs once every Pod is ready, so readiness alone
+// does not mean the recovery target was reached.
+func pointInTimeDataSourceStatus(mdb *mariadbv1alpha1.MariaDB) controller.DataSourceStatus {
+	if err := mdb.ReplayBinlogsError(); err != nil {
+		return controller.DataSourceStatus{
+			Done:    true,
+			State:   controller.DataSourceStateFailed,
+			Reason:  corev1alpha1.ReasonDataSourceFailed,
+			Message: "Replaying binary logs failed: " + err.Error(),
+		}
+	}
+	if mdb.IsReady() && mdb.HasSkippedBinlogReplay() {
+		return dataSourceSucceeded("Instance recovered from the base backup; no binary logs were available to replay")
+	}
+	if mdb.IsReady() && mdb.HasReplayedBinlogs() {
+		return dataSourceSucceeded("Instance recovered to the point in time")
+	}
+	if mdb.IsReplayingBinlogs() {
+		return dataSourceRestoring("Replaying binary logs up to the recovery target")
+	}
+	return dataSourceRestoring("Restoring base backup for point-in-time recovery")
 }
 
 func dataSourceSucceeded(msg string) controller.DataSourceStatus {

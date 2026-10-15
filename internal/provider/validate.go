@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	backupv1alpha1 "github.com/openeverest/openeverest/v2/api/backup/v1alpha1"
 	corev1alpha1 "github.com/openeverest/openeverest/v2/api/core/v1alpha1"
 	"github.com/openeverest/openeverest/v2/provider-runtime/controller"
 
@@ -65,7 +66,37 @@ func ValidateMariaDB(c *controller.Context) error {
 		return fmt.Errorf("PITR validation: %w", err)
 	}
 
+	if err := validatePointInTimeDataSource(c); err != nil {
+		l.Error(err, "Data source validation failed", "name", c.Name())
+		return fmt.Errorf("data source validation: %w", err)
+	}
+
 	return nil
+}
+
+// validatePointInTimeDataSource rejects point-in-time recovery into a
+// non-replication Instance: mariadb-operator only replays binary logs on
+// replication clusters, so such a recovery would silently stop at the base
+// backup. Only checked at creation, so already-recovered Instances keep
+// validating.
+func validatePointInTimeDataSource(c *controller.Context) error {
+	ds := c.Instance().Spec.DataSource
+	if ds == nil || ds.Type != backupv1alpha1.DataSourceTypePointInTime {
+		return nil
+	}
+	if normalizeTopology(c.Instance().GetTopologyType()) == definition.TopologyTypeReplication {
+		return nil
+	}
+	if err := c.Get(&mariadbv1alpha1.MariaDB{}, c.Name()); err == nil {
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("get MariaDB: %w", err)
+	}
+	return fmt.Errorf(
+		"point-in-time recovery is only supported into the %q topology; set spec.topology.type to %q",
+		definition.TopologyTypeReplication,
+		definition.TopologyTypeReplication,
+	)
 }
 
 // validatePITR enforces the constraints of point-in-time recovery: the

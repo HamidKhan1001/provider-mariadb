@@ -1,14 +1,29 @@
-# The point-in-time-recovered cluster comes up Ready with its own connection
-# Secret carrying the (source-derived) credentials.
+# The point-in-time-recovered cluster comes up Ready once the binary logs are
+# replayed (DataSourceReady), with its own connection Secret carrying the
+# (source-derived) credentials. The condition is selected by type (chainsaw
+# matches arrays positionally).
 apiVersion: core.openeverest.io/v1alpha1
 kind: Instance
 metadata:
   name: pitr-restored
 status:
   phase: Ready
+  (conditions[?type == 'DataSourceReady']):
+    - status: "True"
 ---
 apiVersion: v1
 kind: Secret
 metadata:
   name: pitr-restored-conn
 (base64_decode(data.password) != ''): true
+---
+# The operator replayed the archived binary logs (rather than skipping the
+# replay because none were found).
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: MariaDB
+metadata:
+  name: pitr-restored
+status:
+  (conditions[?type == 'BinlogsReplayed']):
+    - status: "True"
+      reason: ReplayBinlogs

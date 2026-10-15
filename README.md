@@ -78,7 +78,7 @@ Stateful workloads additionally report:
 | Backups (on demand) | ✅ | logical (`mariadb-dump`) or physical (`mariadb-backup`) to S3-compatible storage; strategy selected via the backup `type` parameter |
 | Backups (scheduled) | ✅ | cron schedules per storage via `spec.backup` |
 | Restore | ✅ | logical backups are restored in place (same Instance only) or into a new Instance via `spec.dataSource`; physical backups are restored by seeding a new Instance from `spec.dataSource` |
-| Point-in-time recovery | ✅ | binary log archival on the `replication` topology; one storage may enable `pitr`; recover a new Instance to a target time via `spec.dataSource` (`PointInTime`) |
+| Point-in-time recovery | ✅ | binary log archival on the `replication` topology; one storage may enable `pitr`; recover a new `replication` Instance to a target time via `spec.dataSource` (`PointInTime`) |
 
 ## Installation
 
@@ -315,7 +315,14 @@ spec:
           name: my-s3-storage
       recoveryTarget: date   # or "latest"
       date: 2026-02-20T18:00:04Z
+  topology:
+    type: replication
 ```
+
+The recovered Instance must use the `replication` topology: the engine only
+replays binary logs on replication clusters. The Instance reports `Restoring`
+until the binary logs are replayed up to the target, and `Failed` if the replay
+fails.
 
 ## Topologies
 

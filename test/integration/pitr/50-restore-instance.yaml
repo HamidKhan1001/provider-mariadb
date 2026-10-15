@@ -1,8 +1,9 @@
-# A brand-new Instance seeded by point-in-time recovery: restore the source's
-# full base backup and replay archived binary logs up to the latest recoverable
-# time. The provider sets MariaDB.spec.bootstrapFrom.pointInTimeRecoveryRef.
-# backup must be enabled with the same storage the source stream uses (required
-# by the dataSource validation).
+# A brand-new 3-node replication Instance seeded by point-in-time recovery:
+# restore the source's full base backup and replay archived binary logs up to
+# the target date (__TARGET__ is substituted by the test). The provider sets
+# MariaDB.spec.bootstrapFrom.pointInTimeRecoveryRef. backup must be enabled with
+# the same storage the source stream uses (required by the dataSource
+# validation).
 apiVersion: core.openeverest.io/v1alpha1
 kind: Instance
 metadata:
@@ -18,11 +19,14 @@ spec:
           name: pitr-source
         storageRef:
           name: seaweedfs-s3
-      recoveryTarget: latest
+      recoveryTarget: date
+      date: __TARGET__
+  topology:
+    type: replication
   components:
     engine:
       type: mariadb
-      replicas: 1
+      replicas: 3
       resources:
         limits:
           cpu: "1"
