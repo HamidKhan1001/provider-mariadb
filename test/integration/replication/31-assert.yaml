@@ -1,0 +1,17 @@
+# Scale-out completed: the operator reports 4 ready replicas and the Instance is
+# Ready again.
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: MariaDB
+metadata:
+  name: test-replication
+status:
+  replicas: 4
+  (conditions[?type == 'Ready']):
+    - status: "True"
+---
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: test-replication
+status:
+  phase: Ready

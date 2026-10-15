@@ -81,6 +81,9 @@ func (p *MariaDBProvider) Sync(c *controller.Context) error {
 	if err := SyncMariaDB(c); err != nil {
 		return err
 	}
+	if err := SyncReplicaTemplate(c); err != nil {
+		return err
+	}
 	if err := SyncMaxScale(c); err != nil {
 		return err
 	}

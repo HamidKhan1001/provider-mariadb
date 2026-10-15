@@ -1,4 +1,6 @@
 # A 3-node async replication MariaDB Instance used by the replication HA suite.
+# The backup storage stages the physical backup used to seed new replicas when
+# scaling out; no backups are scheduled.
 apiVersion: core.openeverest.io/v1alpha1
 kind: Instance
 metadata:
@@ -21,3 +23,10 @@ spec:
           memory: 512M
       storage:
         size: 1Gi
+  backup:
+    enabled: true
+    classRef:
+      name: mariadb
+    storages:
+      - storageRef:
+          name: seaweedfs-s3

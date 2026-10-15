@@ -252,6 +252,9 @@ func validateTopology(c *controller.Context) error {
 		if err := validateReplicationReplicas(c); err != nil {
 			return err
 		}
+		if err := validateReplicationScaleOut(c); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf(
 			"unsupported spec.topology.type %q; supported values are %q, %q and %q",
@@ -312,6 +315,31 @@ func validateReplicationReplicas(c *controller.Context) error {
 		)
 	}
 	return nil
+}
+
+// validateReplicationScaleOut rejects adding nodes to an existing replication
+// Instance without a backup storage: the operator seeds new replicas from a
+// physical backup of the cluster, staged in that storage.
+func validateReplicationScaleOut(c *controller.Context) error {
+	if replicaTemplateStorage(c.Instance()) != nil {
+		return nil
+	}
+	existing := &mariadbv1alpha1.MariaDB{}
+	if err := c.Get(existing, c.Name()); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get MariaDB: %w", err)
+	}
+	engine := c.Instance().Spec.Components[common.ComponentEngine]
+	if engine.Replicas == nil || *engine.Replicas <= existing.Spec.Replicas {
+		return nil
+	}
+	return fmt.Errorf(
+		"scaling out the %q topology requires a backup storage in spec.backup: "+
+			"new replicas are seeded from a physical backup of the cluster staged there",
+		definition.TopologyTypeReplication,
+	)
 }
 
 // validateTopologyImmutable rejects switching an existing instance between

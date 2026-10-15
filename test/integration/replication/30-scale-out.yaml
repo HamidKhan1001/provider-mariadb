@@ -1,0 +1,11 @@
+# Scale the replication cluster out from 3 to 4 nodes. The new replica is seeded
+# from a physical backup of the cluster, staged in the Instance's backup storage
+# through the provider-managed PhysicalBackup template.
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: test-replication
+spec:
+  components:
+    engine:
+      replicas: 4

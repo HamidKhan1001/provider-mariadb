@@ -244,6 +244,7 @@ func desiredMariaDB(c *controller.Context) (*mariadbv1alpha1.MariaDB, error) {
 			// demotes it, writes routed to it would diverge from the new primary.
 			SemiSyncBootAsReplica: ptr.To(true),
 		}
+		mdb.Spec.Replication.Replica.ReplicaBootstrapFrom = desiredReplicaBootstrapFrom(c)
 	}
 
 	// Standalone routes clients to the general Service (<name>); HA topologies

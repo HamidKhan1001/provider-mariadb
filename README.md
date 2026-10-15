@@ -58,7 +58,7 @@ provider itself is covered under [Installation](#installation).
 | Capability | Status | Notes |
 |---|---|---|
 | Provisioning | ✅ | |
-| Horizontal scaling | ⚠️ | `spec.components.engine.replicas`; scaling out the `replication` topology is not supported yet ([#94](https://github.com/openeverest/provider-mariadb/issues/94)) |
+| Horizontal scaling | ✅ | `spec.components.engine.replicas`; scaling out the `replication` topology requires a backup storage in `spec.backup`, used to stage the physical backup that seeds new replicas |
 | Vertical scaling (CPU / memory) | ✅ | `spec.components.engine.resources` |
 | Version upgrades | ✅ | of the deployed MariaDB version — change `spec.version`; see [Versions](#versions) |
 | High availability (Galera) | ✅ | `spec.topology.type: galera` — multi-master cluster; odd node count (default 3) |
