@@ -147,3 +147,29 @@ func TestValidateReplicationScaleOut(t *testing.T) {
 		})
 	}
 }
+
+func TestDesiredMariaDBReplicaRecovery(t *testing.T) {
+	desired := func(t *testing.T, withStorage bool) *mariadbv1alpha1.MariaDB {
+		in := replicationInstance(3, withStorage)
+		engine := in.Spec.Components[common.ComponentEngine]
+		engine.Image = "mariadb:12.3"
+		in.Spec.Components[common.ComponentEngine] = engine
+		mdb, err := desiredMariaDB(newContextForInstance(t, in))
+		require.NoError(t, err)
+		require.NotNil(t, mdb.Spec.Replication)
+		return mdb
+	}
+
+	t.Run("enabled with the replica template", func(t *testing.T) {
+		replica := desired(t, true).Spec.Replication.Replica
+		require.NotNil(t, replica.ReplicaBootstrapFrom)
+		require.NotNil(t, replica.ReplicaRecovery)
+		assert.True(t, replica.ReplicaRecovery.Enabled)
+	})
+
+	t.Run("unset without a backup storage", func(t *testing.T) {
+		replica := desired(t, false).Spec.Replication.Replica
+		assert.Nil(t, replica.ReplicaBootstrapFrom)
+		assert.Nil(t, replica.ReplicaRecovery)
+	})
+}

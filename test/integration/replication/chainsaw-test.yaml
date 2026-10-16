@@ -6,8 +6,10 @@
 # can authenticate through the primary Service using the credentials published
 # in the connection Secret. It then scales the cluster out to 4 nodes, seeding
 # the new replica from a physical backup staged in the Instance's backup storage
-# (SeaweedFS), and checks every node replicates. Finally it tears the Instance
-# down and asserts the MariaDB CR is garbage-collected.
+# (SeaweedFS), and checks every node replicates. It then breaks a replica (its
+# binary logs are purged on the primary) and checks the operator rebuilds it.
+# Finally it tears the Instance down and asserts the MariaDB CR is
+# garbage-collected.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
@@ -16,7 +18,8 @@ spec:
   description: |
     Create a replication Instance, wait for a real 3-node MariaDB cluster to come
     up, connect to it through the primary Service with the generated
-    login/password, scale it out to 4 nodes, then delete it.
+    login/password, scale it out to 4 nodes, break a replica and check it is
+    recovered automatically, then delete it.
 
   # Collect diagnostics when a step fails.
   catch:
@@ -183,6 +186,61 @@ spec:
                 done
                 [ "$ok" = 1 ] || { echo "test-replication-$i: expected rows 1,2"; exit 1; }
               done
+
+    # Break a replica: while its replication is stopped, the primary purges the
+    # binary logs it still needs, so restarting replication fails with error
+    # 1236. The operator must rebuild it from a physical backup of the cluster.
+    - name: break-replica
+      timeouts:
+        exec: 3m
+      try:
+        - script:
+            content: |
+              set -eu
+              rootpw=$(kubectl -n "$NAMESPACE" get secret everest-secrets-test-replication-root \
+                -o jsonpath='{.data.root-password}' | base64 -d)
+              sql() {
+                kubectl -n "$NAMESPACE" exec "$1" -c mariadb -- env MYSQL_PWD="$rootpw" mariadb -u root -Nse "$2"
+              }
+              primary=$(kubectl -n "$NAMESPACE" get mariadb test-replication -o jsonpath='{.status.currentPrimary}')
+              for i in 0 1 2 3; do
+                if [ "test-replication-$i" != "$primary" ]; then replica="test-replication-$i"; break; fi
+              done
+              sql "$replica" "STOP SLAVE;"
+              sql "$primary" "INSERT INTO everest.scale_probe (id) VALUES (3); FLUSH BINARY LOGS;"
+              current=$(sql "$primary" "SHOW MASTER STATUS;" | awk '{print $1}')
+              sql "$primary" "PURGE BINARY LOGS TO '${current}'; INSERT INTO everest.scale_probe (id) VALUES (4);"
+              sql "$replica" "START SLAVE;"
+              kubectl -n "$NAMESPACE" create configmap broken-replica --from-literal=pod="$replica"
+              echo "broke ${replica} (primary ${primary}, binlogs purged up to ${current})"
+
+    - name: replica-recovered
+      timeouts:
+        assert: 15m
+      try:
+        - assert:
+            file: 40-assert.yaml
+
+    # The rebuilt replica holds every row, including those only present in the
+    # purged binary logs.
+    - name: verify-recovered-replica
+      timeouts:
+        exec: 5m
+      try:
+        - script:
+            content: |
+              set -eu
+              rootpw=$(kubectl -n "$NAMESPACE" get secret everest-secrets-test-replication-root \
+                -o jsonpath='{.data.root-password}' | base64 -d)
+              replica=$(kubectl -n "$NAMESPACE" get configmap broken-replica -o jsonpath='{.data.pod}')
+              for attempt in $(seq 1 18); do
+                out=$(kubectl -n "$NAMESPACE" exec "$replica" -c mariadb -- env MYSQL_PWD="$rootpw" mariadb -u root -Nse \
+                  "SELECT GROUP_CONCAT(id ORDER BY id) FROM everest.scale_probe;" 2>&1 || true)
+                echo "${replica}: ${out}"
+                if [ "$out" = "1,2,3,4" ]; then exit 0; fi
+                sleep 10
+              done
+              exit 1
 
     - name: delete-instance
       try:
