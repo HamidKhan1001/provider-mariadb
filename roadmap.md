@@ -25,10 +25,10 @@ Source of truth: `internal/provider/`, `definition/`, [README](README.md#capabil
 |---|---|---|
 | Provisioning — standalone | ✅ | `mariadb.go` `desiredMariaDB` |
 | HA — Galera | ✅ | `galera` topology, odd replicas ≥ 3, soft anti-affinity, operator PDB |
-| HA — async replication | ✅ | `replication` topology, ≥ 2 replicas, `semiSyncBootAsReplica` |
+| HA — async replication | ✅ | `replication` topology, ≥ 2 replicas, `semiSyncBootAsReplica`; broken replicas rebuilt automatically with a backup storage ([#98]) |
 | Horizontal scaling | ✅ | replication scale-out needs a backup storage to seed new replicas ([#94]) |
-| Vertical scaling, storage expansion | ✅ | `engine.resources`, `engine.storage.size` |
-| Version upgrades | ✅ | `versions.yaml` bundles (10.11, 11.4, 11.8, 12.3); `mariaDBAutoUpgradeEnabled`; downgrades not rejected ([#97]) |
+| Vertical scaling, storage expansion | ✅ | `engine.resources`, `engine.storage.size`; shrinking and StorageClass changes rejected ([#97]) |
+| Version upgrades | ✅ | `versions.yaml` bundles (10.11, 11.4, 11.8, 12.3); `mariaDBAutoUpgradeEnabled`; major/minor downgrades rejected ([#97]) |
 | Custom `my.cnf` | ✅ | engine `configuration` → `spec.myCnf` |
 | Proxy (MaxScale) | ✅ | `proxy` component; failover stays with the operator |
 | Scheduling | ✅ | affinity (no `podAffinity`), nodeSelector, tolerations, topology spread |
@@ -39,7 +39,7 @@ Source of truth: `internal/provider/`, `definition/`, [README](README.md#capabil
 | Physical backups (on demand + scheduled) | ✅ | `type: physical` (`mariadb-backup`), S3 only |
 | Restore — logical in place | ✅ | `SyncRestore` → operator `Restore` |
 | Restore — new Instance from backup | ✅ | logical and physical via `spec.dataSource` ([#93]); in-place restores only from the Instance's own backups |
-| PITR | ✅ | replication topology only (operator limitation, [#114]) |
+| PITR | ✅ | archival and recovery on the replication topology only (operator limitation, [#114]); success reported only after binlog replay ([#118]); re-creating a same-name Instance cannot archive ([#119]) |
 | Maintenance gating / provider upgrades | ❌ | [#95] |
 | Instance deletion cleanup | ⚠️ | PVCs are orphaned ([#96]); backup data never purged ([#100]) |
 | `spec.userSecretRef` | ❌ | [#102] |
@@ -70,8 +70,9 @@ Must be closed before the pre-alpha banner can be removed. Ordered by risk.
 | ~~[#94]~~ | ✅ Replication **scale-out** | Provider-managed replica template staged in the backup storage |
 | [#95] | **Maintenance gating** + `CheckUpgrade` | `autoUpdateDataPlane: true` rolls every cluster on provider upgrade without approval |
 | [#96] | **PVC lifecycle** on deletion | Orphaned volumes; same-name Instance reattaches stale datadir |
-| [#97] | **Validate** unsafe updates | Version downgrade, storage shrink (Instance stuck), storageClass change (ignored) |
-| [#98] | **Replica recovery** (after #94) | Broken replicas stay broken until rebuilt by hand |
+| ~~[#97]~~ | ✅ **Validate** unsafe updates | Downgrades, storage shrink and StorageClass changes rejected |
+| ~~[#98]~~ | ✅ **Replica recovery** | Broken replicas rebuilt from the replica template |
+| ~~[#118]~~ | ✅ PITR restore **success only after binlog replay** | Recovery into non-replication Instances rejected |
 | [#99], [#78] | **Failure-scenario + upgrade tests** | Failover, Galera recovery, scale-out, logical restore, provider upgrade are untested |
 
 ## 3. Day-2 operations — `priority/high`
@@ -83,6 +84,7 @@ Must be closed before the pre-alpha banner can be removed. Ordered by risk.
 | [#102] | `spec.userSecretRef` initial credentials |
 | [#103], [#92] | Alerting rules (`PrometheusRule`) and ServiceMonitor discovery labels |
 | [#104] | Runbooks: Galera bootstrap (`forceClusterBootstrapInPod`), switchover, suspend, restore |
+| [#119] | Re-creating a PITR-enabled Instance with the same name cannot archive binlogs |
 
 ## 4. Good to have — `priority/nice-to-have`
 
@@ -99,24 +101,24 @@ Must be closed before the pre-alpha banner can be removed. Ordered by risk.
 | [#76], [#77] | zstd compression for backups and PITR binlogs |
 | [#39] | cert-manager integration |
 | [#113] | Cross-cluster DR replica (operator multi-cluster topology) |
-| [#114] | PITR on Galera/standalone — **blocked upstream** (`docs/pitr.md`) |
+| [#114] | PITR archival and recovery on Galera/standalone — **blocked upstream** (`docs/pitr.md`, mariadb-operator#1961) |
 | [#115] | Refresh mysqld-exporter / MaxScale versions |
 
 ### Known platform constraints
 
 - `BackupStorage` is S3-only in the OpenEverest API; the operator also supports Azure Blob,
   PVC and VolumeSnapshot storage. Azure support needs a platform API change first.
-- PITR binlog archival is replication-only in mariadb-operator 26.10 (#114).
+- PITR binlog archival, and replaying binlogs into a recovered Instance, are
+  replication-only in mariadb-operator 26.10 (#114, mariadb-operator#1961).
 
 ---
 
 ## 5. Suggested delivery order
 
-1. Correctness bugs: #96, #97 (#93, #94 done).
-2. Safety for upgrades: #95, then #78 / #99 test coverage.
-3. Self-healing: #98.
-4. Day-2: #100, #101, #103 + #92, #102, #104.
-5. Nice-to-have items as demand appears.
+1. Safety for upgrades: #95, then #78 / #99 test coverage.
+2. Cleanup on deletion: #96, #119 (#93, #94, #97, #98, #118 done).
+3. Day-2: #100, #101, #103 + #92, #102, #104.
+4. Nice-to-have items as demand appears.
 
 ## 6. Cross-cutting reminders
 
@@ -161,3 +163,5 @@ Must be closed before the pre-alpha banner can be removed. Ordered by risk.
 [#113]: https://github.com/openeverest/provider-mariadb/issues/113
 [#114]: https://github.com/openeverest/provider-mariadb/issues/114
 [#115]: https://github.com/openeverest/provider-mariadb/issues/115
+[#118]: https://github.com/openeverest/provider-mariadb/issues/118
+[#119]: https://github.com/openeverest/provider-mariadb/issues/119
