@@ -60,7 +60,7 @@ provider itself is covered under [Installation](#installation).
 | Provisioning | ✅ | |
 | Horizontal scaling | ✅ | `spec.components.engine.replicas`; scaling out the `replication` topology requires a backup storage in `spec.backup`, used to stage the physical backup that seeds new replicas |
 | Vertical scaling (CPU / memory) | ✅ | `spec.components.engine.resources` |
-| Version upgrades | ✅ | of the deployed MariaDB version — change `spec.version`; see [Versions](#versions) |
+| Version upgrades | ✅ | of the deployed MariaDB version — change `spec.version`; see [Versions](#versions). Downgrades to an older major or minor version are rejected |
 | High availability (Galera) | ✅ | `spec.topology.type: galera` — multi-master cluster; odd node count (default 3) |
 | High availability (replication) | ✅ | `spec.topology.type: replication` — async primary/replica cluster; at least 2 nodes (default 3). With a backup storage in `spec.backup`, replicas that break are rebuilt automatically |
 | Proxy / load balancing (MaxScale) | ✅ | opt-in via the `proxy` component on `galera` and `replication`; see [MaxScale proxy](#maxscale-proxy) |
@@ -74,7 +74,7 @@ Stateful workloads additionally report:
 | Capability | Status | Notes |
 |---|---|---|
 | Persistent storage | ✅ | `spec.components.engine.storage.size` |
-| Storage expansion | ✅ | when the StorageClass allows volume expansion |
+| Storage expansion | ✅ | when the StorageClass allows volume expansion; shrinking the volume or changing its StorageClass is rejected |
 | Backups (on demand) | ✅ | logical (`mariadb-dump`) or physical (`mariadb-backup`) to S3-compatible storage; strategy selected via the backup `type` parameter |
 | Backups (scheduled) | ✅ | cron schedules per storage via `spec.backup` |
 | Restore | ✅ | logical backups are restored in place (same Instance only) or into a new Instance via `spec.dataSource`; physical backups are restored by seeding a new Instance from `spec.dataSource` |
