@@ -4,8 +4,10 @@
 # Provisions a real 3-node primary/replica cluster through the bundled
 # mariadb-operator, waits for it to become Running, and verifies that a client
 # can authenticate through the primary Service using the credentials published
-# in the connection Secret. Finally it tears the Instance down and asserts the
-# MariaDB CR is garbage-collected.
+# in the connection Secret. It then scales the cluster out to 4 nodes, seeding
+# the new replica from a physical backup staged in the Instance's backup storage
+# (SeaweedFS), and checks every node replicates. Finally it tears the Instance
+# down and asserts the MariaDB CR is garbage-collected.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
@@ -14,14 +16,14 @@ spec:
   description: |
     Create a replication Instance, wait for a real 3-node MariaDB cluster to come
     up, connect to it through the primary Service with the generated
-    login/password, then delete it.
+    login/password, scale it out to 4 nodes, then delete it.
 
   # Collect diagnostics when a step fails.
   catch:
     - script:
-        content: kubectl -n $NAMESPACE get instance,mariadb,pods,svc,pdb -o wide
+        content: kubectl -n $NAMESPACE get instance,mariadb,physicalbackup,pods,svc,pdb -o wide
     - script:
-        content: kubectl -n $NAMESPACE get mariadb -o yaml
+        content: kubectl -n $NAMESPACE get mariadb,physicalbackup -o yaml
     - script:
         content: |
           ns=$(kubectl get deploy -A -l app.kubernetes.io/name=provider-mariadb \
@@ -41,6 +43,23 @@ spec:
                 -o jsonpath='{.items[*].status.availableReplicas}')
               echo "provider available replicas: ${avail:-0}"
               echo "${avail}" | grep -q '[1-9]'
+
+    # Deploy the shared SeaweedFS (idempotent): the backup storage stages the
+    # physical backup that seeds new replicas on scale-out.
+    - name: setup-seaweedfs
+      timeouts:
+        exec: 4m
+      try:
+        - script:
+            content: |
+              set -eu
+              kubectl apply -f "${PROVIDER_ROOT_PATH}/dev/resources/seaweedfs.yaml"
+              kubectl -n seaweedfs rollout status deploy/seaweedfs --timeout=180s
+
+    - name: backup-storage
+      try:
+        - apply:
+            file: 05-backupstorage.yaml
 
     - name: create-instance
       try:
@@ -105,6 +124,65 @@ spec:
                     "volumes": [{"name": "tls", "secret": {"secretName": "test-replication-conn", "items": [{"key": "ca.crt", "path": "ca.crt"}]}}]
                   }
                 }'
+
+    # Write a row before scaling out; the new replica must receive it through
+    # the seeding backup, and later writes through replication. Written as root
+    # via the primary pod's local socket.
+    - name: seed-data
+      timeouts:
+        exec: 3m
+      try:
+        - script:
+            content: |
+              set -eu
+              rootpw=$(kubectl -n "$NAMESPACE" get secret everest-secrets-test-replication-root \
+                -o jsonpath='{.data.root-password}' | base64 -d)
+              primary=$(kubectl -n "$NAMESPACE" get mariadb test-replication -o jsonpath='{.status.currentPrimary}')
+              kubectl -n "$NAMESPACE" exec "$primary" -c mariadb -- env MYSQL_PWD="$rootpw" mariadb -u root -e \
+                "CREATE TABLE IF NOT EXISTS everest.scale_probe (id INT PRIMARY KEY); INSERT INTO everest.scale_probe (id) VALUES (1);"
+
+    - name: scale-out
+      timeouts:
+        assert: 2m
+      try:
+        - patch:
+            file: 30-scale-out.yaml
+        - assert:
+            file: 30-assert.yaml
+
+    - name: scaled-out
+      timeouts:
+        assert: 15m
+      try:
+        - assert:
+            file: 31-assert.yaml
+
+    # Every node, including the new one, holds the row written before the
+    # scale-out and one written after it.
+    - name: verify-replication
+      timeouts:
+        exec: 5m
+      try:
+        - script:
+            content: |
+              set -eu
+              rootpw=$(kubectl -n "$NAMESPACE" get secret everest-secrets-test-replication-root \
+                -o jsonpath='{.data.root-password}' | base64 -d)
+              primary=$(kubectl -n "$NAMESPACE" get mariadb test-replication -o jsonpath='{.status.currentPrimary}')
+              kubectl -n "$NAMESPACE" exec "$primary" -c mariadb -- env MYSQL_PWD="$rootpw" mariadb -u root -e \
+                "INSERT INTO everest.scale_probe (id) VALUES (2);"
+              for i in 0 1 2 3; do
+                ok=0
+                for attempt in $(seq 1 12); do
+                  out=$(kubectl -n "$NAMESPACE" exec "test-replication-$i" -c mariadb -- \
+                    env MYSQL_PWD="$rootpw" mariadb -u root -Nse \
+                    "SELECT GROUP_CONCAT(id ORDER BY id) FROM everest.scale_probe;" 2>&1 || true)
+                  echo "test-replication-$i: ${out}"
+                  if [ "$out" = "1,2" ]; then ok=1; break; fi
+                  sleep 10
+                done
+                [ "$ok" = 1 ] || { echo "test-replication-$i: expected rows 1,2"; exit 1; }
+              done
 
     - name: delete-instance
       try:

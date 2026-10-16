@@ -172,7 +172,7 @@ test-integration-maxscale: ## Run MaxScale proxy integration tests.
 	. ./test/vars.sh && chainsaw test --config ./test/integration/.chainsaw.yaml ./test/integration/maxscale
 
 .PHONY: test-integration-backup
-test-integration-backup: ## Run physical backup/restore integration tests (deploys SeaweedFS).
+test-integration-backup: ## Run physical and logical backup/restore integration tests (deploys SeaweedFS).
 	. ./test/vars.sh && chainsaw test --config ./test/integration/.chainsaw.yaml ./test/integration/backup
 
 .PHONY: test-integration-pitr

@@ -1,0 +1,27 @@
+# S3 BackupStorage (+ credentials Secret) for the suite, pointing at the shared
+# in-cluster SeaweedFS deployed in the `seaweedfs` namespace. Created in the ephemeral
+# test namespace so the provider resolves it alongside the Backup/Instance CRs.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: seaweedfs-credentials
+type: Opaque
+data:
+  # seaweedfsadmin / seaweedfsadmin
+  AWS_ACCESS_KEY_ID: c2Vhd2VlZGZzYWRtaW4=
+  AWS_SECRET_ACCESS_KEY: c2Vhd2VlZGZzYWRtaW4=
+---
+apiVersion: backup.openeverest.io/v1alpha1
+kind: BackupStorage
+metadata:
+  name: seaweedfs-s3
+spec:
+  type: s3
+  s3:
+    bucket: backups
+    region: us-east-1
+    endpointURL: http://seaweedfs.seaweedfs.svc.cluster.local
+    forcePathStyle: true
+    verifyTLS: false
+    credentialsSecretRef:
+      name: seaweedfs-credentials

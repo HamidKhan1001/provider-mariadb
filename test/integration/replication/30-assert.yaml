@@ -1,0 +1,24 @@
+# The provider points the operator at its replica template, and the operator
+# scales the cluster out to 4 ready nodes.
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: MariaDB
+metadata:
+  name: test-replication
+spec:
+  replicas: 4
+  replication:
+    replica:
+      bootstrapFrom:
+        physicalBackupTemplateRef:
+          name: test-replication-replica-tpl
+---
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: PhysicalBackup
+metadata:
+  name: test-replication-replica-tpl
+spec:
+  schedule:
+    suspend: true
+  storage:
+    s3:
+      prefix: test-replication-replica

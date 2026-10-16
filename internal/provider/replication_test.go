@@ -70,6 +70,7 @@ func TestValidateTopology_ReplicationImmutable(t *testing.T) {
 		return &mariadbv1alpha1.MariaDB{
 			ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 			Spec: mariadbv1alpha1.MariaDBSpec{
+				Replicas:    3,
 				Replication: &mariadbv1alpha1.Replication{Enabled: true},
 			},
 		}

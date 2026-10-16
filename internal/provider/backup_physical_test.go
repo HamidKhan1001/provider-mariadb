@@ -138,12 +138,12 @@ func instanceSeededFrom(backupName string) *corev1alpha1.Instance {
 	}
 }
 
-func TestResolvePhysicalBootstrapFrom(t *testing.T) {
+func TestResolveBootstrapFrom(t *testing.T) {
 	completedAt := metav1.NewTime(time.Now().Truncate(time.Second))
 
 	t.Run("no data source yields no bootstrap", func(t *testing.T) {
 		c := newContextWith(t)
-		got, _, err := resolvePhysicalBootstrapFrom(c)
+		got, _, err := resolveBootstrapFrom(c)
 		require.NoError(t, err)
 		assert.Nil(t, got)
 	})
@@ -156,22 +156,55 @@ func TestResolvePhysicalBootstrapFrom(t *testing.T) {
 		c := newContextForInstance(t, instanceSeededFrom("backup-1"),
 			source, s3BackupStorage("s3", "https://minio.example.com:9000"))
 
-		_, _, err := resolvePhysicalBootstrapFrom(c)
+		_, _, err := resolveBootstrapFrom(c)
 		require.Error(t, err)
 		var waitErr *controller.WaitError
 		assert.ErrorAs(t, err, &waitErr)
 	})
 
-	t.Run("logical source is not handled here", func(t *testing.T) {
+	t.Run("succeeded logical source builds a logical bootstrapFrom pinned to the source", func(t *testing.T) {
 		source := physicalBackup("backup-1")
 		source.Spec.Parameters = &runtime.RawExtension{Raw: []byte(`{"type":"logical"}`)}
+		source.Spec.Origin.InstanceRef = &commonv1alpha1.ObjectRef{Name: "source-db"}
+		source.Status.State = backupv1alpha1.BackupStateSucceeded
+		source.Status.CompletedAt = &completedAt
+		c := newContextForInstance(t, instanceSeededFrom("backup-1"),
+			source, s3BackupStorage("s3", "https://minio.example.com:9000"))
+
+		got, sourceInstance, err := resolveBootstrapFrom(c)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.NotNil(t, got.S3)
+		assert.Equal(t, "source-db", got.S3.Prefix)
+		assert.Equal(t, "source-db", sourceInstance)
+		assert.Equal(t, mariadbv1alpha1.BackupContentTypeLogical, got.BackupContentType)
+		require.NotNil(t, got.TargetRecoveryTime)
+		assert.Equal(t, completedAt.Time, got.TargetRecoveryTime.Time)
+	})
+
+	t.Run("source backup without a type defaults to logical", func(t *testing.T) {
+		source := physicalBackup("backup-1")
+		source.Spec.Parameters = nil
 		source.Status.State = backupv1alpha1.BackupStateSucceeded
 		c := newContextForInstance(t, instanceSeededFrom("backup-1"),
 			source, s3BackupStorage("s3", "https://minio.example.com:9000"))
 
-		got, _, err := resolvePhysicalBootstrapFrom(c)
+		got, _, err := resolveBootstrapFrom(c)
 		require.NoError(t, err)
-		assert.Nil(t, got)
+		require.NotNil(t, got)
+		assert.Equal(t, mariadbv1alpha1.BackupContentTypeLogical, got.BackupContentType)
+	})
+
+	t.Run("failed source backup is a terminal seeding failure", func(t *testing.T) {
+		source := physicalBackup("backup-1")
+		source.Spec.Parameters = &runtime.RawExtension{Raw: []byte(`{"type":"logical"}`)}
+		source.Status.State = backupv1alpha1.BackupStateFailed
+		c := newContextForInstance(t, instanceSeededFrom("backup-1"),
+			source, s3BackupStorage("s3", "https://minio.example.com:9000"))
+
+		_, _, err := resolveBootstrapFrom(c)
+		var dsErr *controller.DataSourceConfigError
+		assert.ErrorAs(t, err, &dsErr)
 	})
 
 	t.Run("succeeded physical source builds bootstrapFrom pinned to the source", func(t *testing.T) {
@@ -183,7 +216,7 @@ func TestResolvePhysicalBootstrapFrom(t *testing.T) {
 		c := newContextForInstance(t, instanceSeededFrom("backup-1"),
 			source, s3BackupStorage("s3", "https://minio.example.com:9000"))
 
-		got, sourceInstance, err := resolvePhysicalBootstrapFrom(c)
+		got, sourceInstance, err := resolveBootstrapFrom(c)
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		require.NotNil(t, got.S3)
@@ -202,13 +235,13 @@ func credentialSecret(name, key, value string) *corev1.Secret {
 	}
 }
 
-func TestEnsurePhysicalRestoreCredentials(t *testing.T) {
+func TestEnsureRestoreCredentials(t *testing.T) {
 	t.Run("copies source root and user secrets onto the target names", func(t *testing.T) {
 		srcRoot := credentialSecret(rootSecretName("source-db"), rootPasswordSecretKey, "r00t")
 		srcUser := credentialSecret(userSecretName("source-db"), userPasswordSecretKey, "s3cret")
 		c := newContextWith(t, srcRoot, srcUser)
 
-		require.NoError(t, ensurePhysicalRestoreCredentials(c, "source-db"))
+		require.NoError(t, ensureRestoreCredentials(c, "source-db"))
 
 		gotRoot := &corev1.Secret{}
 		require.NoError(t, c.Get(gotRoot, rootSecretName("db")))
@@ -225,7 +258,7 @@ func TestEnsurePhysicalRestoreCredentials(t *testing.T) {
 		existing := credentialSecret(rootSecretName("db"), rootPasswordSecretKey, "keep-me")
 		c := newContextWith(t, srcRoot, srcUser, existing)
 
-		require.NoError(t, ensurePhysicalRestoreCredentials(c, "source-db"))
+		require.NoError(t, ensureRestoreCredentials(c, "source-db"))
 
 		gotRoot := &corev1.Secret{}
 		require.NoError(t, c.Get(gotRoot, rootSecretName("db")))
@@ -235,14 +268,14 @@ func TestEnsurePhysicalRestoreCredentials(t *testing.T) {
 	t.Run("missing source secret is a terminal seeding failure", func(t *testing.T) {
 		c := newContextWith(t)
 
-		err := ensurePhysicalRestoreCredentials(c, "source-db")
+		err := ensureRestoreCredentials(c, "source-db")
 		require.Error(t, err)
 		var dsErr *controller.DataSourceConfigError
 		assert.ErrorAs(t, err, &dsErr)
 	})
 }
 
-func TestSyncPhysicalDataSourceStatus(t *testing.T) {
+func TestSyncDataSourceStatus(t *testing.T) {
 	physicalBootstrapMariaDB := func(ready bool) *mariadbv1alpha1.MariaDB {
 		mdb := &mariadbv1alpha1.MariaDB{
 			ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "ns"},
@@ -265,7 +298,7 @@ func TestSyncPhysicalDataSourceStatus(t *testing.T) {
 
 	t.Run("ready cluster reports succeeded", func(t *testing.T) {
 		c := newContextForInstance(t, instanceSeededFrom("backup-1"), physicalBootstrapMariaDB(true))
-		require.NoError(t, syncPhysicalDataSourceStatus(c))
+		require.NoError(t, syncDataSourceStatus(c))
 		got := c.GetDataSourceStatus()
 		require.NotNil(t, got)
 		assert.True(t, got.Done)
@@ -274,7 +307,7 @@ func TestSyncPhysicalDataSourceStatus(t *testing.T) {
 
 	t.Run("unready cluster reports restoring", func(t *testing.T) {
 		c := newContextForInstance(t, instanceSeededFrom("backup-1"), physicalBootstrapMariaDB(false))
-		require.NoError(t, syncPhysicalDataSourceStatus(c))
+		require.NoError(t, syncDataSourceStatus(c))
 		got := c.GetDataSourceStatus()
 		require.NotNil(t, got)
 		assert.False(t, got.Done)
@@ -283,8 +316,101 @@ func TestSyncPhysicalDataSourceStatus(t *testing.T) {
 
 	t.Run("no data source is a no-op", func(t *testing.T) {
 		c := newContextWith(t, &mariadbv1alpha1.MariaDB{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "ns"}})
-		require.NoError(t, syncPhysicalDataSourceStatus(c))
+		require.NoError(t, syncDataSourceStatus(c))
 		assert.Nil(t, c.GetDataSourceStatus())
+	})
+}
+
+func logicalBootstrapMariaDB(conditions ...metav1.Condition) *mariadbv1alpha1.MariaDB {
+	for i := range conditions {
+		conditions[i].LastTransitionTime = metav1.Now()
+	}
+	return &mariadbv1alpha1.MariaDB{
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "ns"},
+		Spec: mariadbv1alpha1.MariaDBSpec{
+			BootstrapFrom: &mariadbv1alpha1.BootstrapFrom{
+				BackupContentType: mariadbv1alpha1.BackupContentTypeLogical,
+			},
+		},
+		Status: mariadbv1alpha1.MariaDBStatus{Conditions: conditions},
+	}
+}
+
+var (
+	mariadbReady = metav1.Condition{
+		Type: mariadbv1alpha1.ConditionTypeReady, Status: metav1.ConditionTrue, Reason: "Ready",
+	}
+	backupRestored = metav1.Condition{
+		Type:   mariadbv1alpha1.ConditionTypeBackupRestored,
+		Status: metav1.ConditionTrue,
+		Reason: mariadbv1alpha1.ConditionReasonRestoreBackup,
+	}
+)
+
+func TestSyncDataSourceStatusLogical(t *testing.T) {
+	t.Run("ready cluster without a restored backup is still restoring", func(t *testing.T) {
+		// The operator brings the cluster up before it restores a logical
+		// backup, so Ready alone must not end the seeding.
+		c := newContextForInstance(t, instanceSeededFrom("backup-1"), logicalBootstrapMariaDB(mariadbReady))
+		require.NoError(t, syncDataSourceStatus(c))
+		got := c.GetDataSourceStatus()
+		require.NotNil(t, got)
+		assert.False(t, got.Done)
+		assert.Equal(t, controller.DataSourceStateRestoring, got.State)
+	})
+
+	t.Run("restored and ready cluster reports succeeded", func(t *testing.T) {
+		c := newContextForInstance(t, instanceSeededFrom("backup-1"),
+			logicalBootstrapMariaDB(mariadbReady, backupRestored))
+		require.NoError(t, syncDataSourceStatus(c))
+		got := c.GetDataSourceStatus()
+		require.NotNil(t, got)
+		assert.True(t, got.Done)
+		assert.Equal(t, controller.DataSourceStateSucceeded, got.State)
+	})
+
+	t.Run("failed bootstrap restore reports failed", func(t *testing.T) {
+		mdb := logicalBootstrapMariaDB()
+		restore := &mariadbv1alpha1.Restore{
+			ObjectMeta: metav1.ObjectMeta{Name: mdb.RestoreKey().Name, Namespace: "ns"},
+			Status: mariadbv1alpha1.RestoreStatus{Conditions: []metav1.Condition{{
+				Type:               mariadbv1alpha1.ConditionTypeComplete,
+				Status:             metav1.ConditionFalse,
+				Reason:             mariadbv1alpha1.ConditionReasonJobFailed,
+				Message:            "job failed",
+				LastTransitionTime: metav1.Now(),
+			}}},
+		}
+		c := newContextForInstance(t, instanceSeededFrom("backup-1"), mdb, restore)
+		require.NoError(t, syncDataSourceStatus(c))
+		got := c.GetDataSourceStatus()
+		require.NotNil(t, got)
+		assert.True(t, got.Done)
+		assert.Equal(t, controller.DataSourceStateFailed, got.State)
+		assert.Contains(t, got.Message, "job failed")
+	})
+}
+
+func TestStatusMariaDBHoldsPhaseWhileSeeding(t *testing.T) {
+	t.Run("restoring while a logical backup is not yet applied", func(t *testing.T) {
+		c := newContextForInstance(t, instanceSeededFrom("backup-1"), logicalBootstrapMariaDB(mariadbReady))
+		require.NoError(t, syncDataSourceStatus(c))
+
+		status, err := StatusMariaDB(c)
+		require.NoError(t, err)
+		assert.Equal(t, corev1alpha1.InstancePhaseRestoring, status.Phase)
+	})
+
+	t.Run("failed when seeding failed", func(t *testing.T) {
+		c := newContextForInstance(t, instanceSeededFrom("backup-1"), logicalBootstrapMariaDB(mariadbReady))
+		c.SetDataSourceStatus(controller.DataSourceStatus{
+			Done:  true,
+			State: controller.DataSourceStateFailed,
+		})
+
+		status, err := StatusMariaDB(c)
+		require.NoError(t, err)
+		assert.Equal(t, corev1alpha1.InstancePhaseFailed, status.Phase)
 	})
 }
 

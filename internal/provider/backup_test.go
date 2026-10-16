@@ -256,6 +256,7 @@ func TestSyncBackup(t *testing.T) {
 	assert.Equal(t, "minio.example.com:9000", opBackup.Spec.Storage.S3.Endpoint)
 	assert.Equal(t, mariadbv1alpha1.CompressAlgorithm("gzip"), opBackup.Spec.Compression)
 	assert.Equal(t, []string{"app"}, opBackup.Spec.Databases)
+	assert.Equal(t, []string{"--flush-privileges"}, opBackup.Spec.Args)
 	require.NotNil(t, opBackup.Spec.IgnoreGlobalPriv)
 	assert.True(t, *opBackup.Spec.IgnoreGlobalPriv)
 	require.Len(t, opBackup.OwnerReferences, 1)
@@ -377,6 +378,40 @@ func TestSyncRestoreCreatesOperatorRestore(t *testing.T) {
 	assert.Equal(t, "db", opRestore.Spec.MariaDBRef.Name)
 	require.NotNil(t, opRestore.Spec.BackupRef)
 	assert.Equal(t, "backup-1", opRestore.Spec.BackupRef.Name)
+}
+
+func TestSyncRestoreRejectsBackupFromAnotherInstance(t *testing.T) {
+	mdb := &mariadbv1alpha1.MariaDB{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "ns"}}
+	sourceBackup := &backupv1alpha1.Backup{
+		ObjectMeta: metav1.ObjectMeta{Name: "backup-1", Namespace: "ns"},
+		Spec: backupv1alpha1.BackupSpec{
+			Origin: backupv1alpha1.BackupOrigin{
+				Type:        backupv1alpha1.BackupOriginTypeInstance,
+				InstanceRef: &commonv1alpha1.ObjectRef{Name: "other-db"},
+			},
+		},
+		Status: backupv1alpha1.BackupStatus{State: backupv1alpha1.BackupStateSucceeded},
+	}
+	restore := &backupv1alpha1.Restore{
+		ObjectMeta: metav1.ObjectMeta{Name: "restore-1", Namespace: "ns"},
+		Spec: backupv1alpha1.RestoreSpec{
+			InstanceRef: commonv1alpha1.ObjectRef{Name: "db"},
+			DataSource: backupv1alpha1.DataSource{
+				Type:   backupv1alpha1.DataSourceTypeBackup,
+				Backup: &backupv1alpha1.DataSourceBackup{BackupRef: commonv1alpha1.ObjectRef{Name: "backup-1"}},
+			},
+		},
+	}
+	c := newContextWith(t, mdb, sourceBackup, restore)
+
+	p := &MariaDBProvider{}
+	out, err := p.SyncRestore(c, restore)
+	require.NoError(t, err)
+	assert.Equal(t, backupv1alpha1.RestoreStateFailed, out.State)
+	assert.Contains(t, out.Message, "spec.dataSource")
+
+	err = c.Get(&mariadbv1alpha1.Restore{}, "restore-1")
+	assert.True(t, controller.IsNotFound(err))
 }
 
 func TestCleanupBackup(t *testing.T) {

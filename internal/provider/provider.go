@@ -81,6 +81,9 @@ func (p *MariaDBProvider) Sync(c *controller.Context) error {
 	if err := SyncMariaDB(c); err != nil {
 		return err
 	}
+	if err := SyncReplicaTemplate(c); err != nil {
+		return err
+	}
 	if err := SyncMaxScale(c); err != nil {
 		return err
 	}
@@ -90,7 +93,7 @@ func (p *MariaDBProvider) Sync(c *controller.Context) error {
 	if err := SyncPITR(c); err != nil {
 		return err
 	}
-	return syncPhysicalDataSourceStatus(c)
+	return syncDataSourceStatus(c)
 }
 
 // Status reads the MariaDB CR status and translates it to an Instance status.

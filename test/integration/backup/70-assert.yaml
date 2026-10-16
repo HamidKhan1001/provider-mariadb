@@ -1,0 +1,9 @@
+# The provider seeds the restored Instance by wiring MariaDB.spec.bootstrapFrom
+# to the logical backup content type.
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: MariaDB
+metadata:
+  name: logical-restored
+spec:
+  bootstrapFrom:
+    backupContentType: Logical

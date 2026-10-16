@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	backupv1alpha1 "github.com/openeverest/openeverest/v2/api/backup/v1alpha1"
 	corev1alpha1 "github.com/openeverest/openeverest/v2/api/core/v1alpha1"
 	"github.com/openeverest/openeverest/v2/provider-runtime/controller"
 
@@ -65,7 +66,37 @@ func ValidateMariaDB(c *controller.Context) error {
 		return fmt.Errorf("PITR validation: %w", err)
 	}
 
+	if err := validatePointInTimeDataSource(c); err != nil {
+		l.Error(err, "Data source validation failed", "name", c.Name())
+		return fmt.Errorf("data source validation: %w", err)
+	}
+
 	return nil
+}
+
+// validatePointInTimeDataSource rejects point-in-time recovery into a
+// non-replication Instance: mariadb-operator only replays binary logs on
+// replication clusters, so such a recovery would silently stop at the base
+// backup. Only checked at creation, so already-recovered Instances keep
+// validating.
+func validatePointInTimeDataSource(c *controller.Context) error {
+	ds := c.Instance().Spec.DataSource
+	if ds == nil || ds.Type != backupv1alpha1.DataSourceTypePointInTime {
+		return nil
+	}
+	if normalizeTopology(c.Instance().GetTopologyType()) == definition.TopologyTypeReplication {
+		return nil
+	}
+	if err := c.Get(&mariadbv1alpha1.MariaDB{}, c.Name()); err == nil {
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("get MariaDB: %w", err)
+	}
+	return fmt.Errorf(
+		"point-in-time recovery is only supported into the %q topology; set spec.topology.type to %q",
+		definition.TopologyTypeReplication,
+		definition.TopologyTypeReplication,
+	)
 }
 
 // validatePITR enforces the constraints of point-in-time recovery: the
@@ -221,6 +252,9 @@ func validateTopology(c *controller.Context) error {
 		if err := validateReplicationReplicas(c); err != nil {
 			return err
 		}
+		if err := validateReplicationScaleOut(c); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf(
 			"unsupported spec.topology.type %q; supported values are %q, %q and %q",
@@ -281,6 +315,31 @@ func validateReplicationReplicas(c *controller.Context) error {
 		)
 	}
 	return nil
+}
+
+// validateReplicationScaleOut rejects adding nodes to an existing replication
+// Instance without a backup storage: the operator seeds new replicas from a
+// physical backup of the cluster, staged in that storage.
+func validateReplicationScaleOut(c *controller.Context) error {
+	if replicaTemplateStorage(c.Instance()) != nil {
+		return nil
+	}
+	existing := &mariadbv1alpha1.MariaDB{}
+	if err := c.Get(existing, c.Name()); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get MariaDB: %w", err)
+	}
+	engine := c.Instance().Spec.Components[common.ComponentEngine]
+	if engine.Replicas == nil || *engine.Replicas <= existing.Spec.Replicas {
+		return nil
+	}
+	return fmt.Errorf(
+		"scaling out the %q topology requires a backup storage in spec.backup: "+
+			"new replicas are seeded from a physical backup of the cluster staged there",
+		definition.TopologyTypeReplication,
+	)
 }
 
 // validateTopologyImmutable rejects switching an existing instance between

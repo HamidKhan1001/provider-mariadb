@@ -208,6 +208,10 @@ func (p *MariaDBProvider) SyncBackup(
 // applyLogicalBackupParameters applies the decoded parameters onto the operator
 // (logical) Backup spec.
 func applyLogicalBackupParameters(spec *mariadbv1alpha1.BackupSpec, params mariadbbackup.MariadbBackupParameters) {
+	// A dump that includes mysql.global_priv only rewrites the table on restore;
+	// without a privilege reload the server keeps serving the old in-memory
+	// accounts, and the restored users cannot log in until a restart.
+	spec.Args = []string{"--flush-privileges"}
 	spec.Databases = params.Databases
 	spec.IgnoreGlobalPriv = params.IgnoreGlobalPriv
 	if params.Compression != "" {
@@ -259,6 +263,16 @@ func (p *MariaDBProvider) SyncRestore(
 			State: backupv1alpha1.RestoreStateFailed,
 			Message: "In-place restore of a physical backup is not supported; " +
 				"seed a new Instance from this Backup via spec.dataSource instead",
+		}, nil
+	}
+	// A logical dump carries its Instance's accounts (mysql.global_priv), which
+	// would replace the target's while its credential Secrets stay unchanged,
+	// locking the operator and the probes out of the target.
+	if origin := sourceBackup.Spec.Origin.InstanceRef; origin != nil && origin.Name != restore.Spec.InstanceRef.Name {
+		return controller.RestoreExecutionStatus{
+			State: backupv1alpha1.RestoreStateFailed,
+			Message: fmt.Sprintf("In-place restore of a backup taken from another Instance (%q) is not supported; "+
+				"seed a new Instance from this Backup via spec.dataSource instead", origin.Name),
 		}, nil
 	}
 	if sourceBackup.Status.State == backupv1alpha1.BackupStateFailed {

@@ -26,7 +26,7 @@ Source of truth: `internal/provider/`, `definition/`, [README](README.md#capabil
 | Provisioning — standalone | ✅ | `mariadb.go` `desiredMariaDB` |
 | HA — Galera | ✅ | `galera` topology, odd replicas ≥ 3, soft anti-affinity, operator PDB |
 | HA — async replication | ✅ | `replication` topology, ≥ 2 replicas, `semiSyncBootAsReplica` |
-| Horizontal scaling | ⚠️ | standalone/Galera OK; **replication scale-out fails** ([#94]) |
+| Horizontal scaling | ✅ | replication scale-out needs a backup storage to seed new replicas ([#94]) |
 | Vertical scaling, storage expansion | ✅ | `engine.resources`, `engine.storage.size` |
 | Version upgrades | ✅ | `versions.yaml` bundles (10.11, 11.4, 11.8, 12.3); `mariaDBAutoUpgradeEnabled`; downgrades not rejected ([#97]) |
 | Custom `my.cnf` | ✅ | engine `configuration` → `spec.myCnf` |
@@ -38,7 +38,7 @@ Source of truth: `internal/provider/`, `definition/`, [README](README.md#capabil
 | Logical backups (on demand + scheduled) | ✅ | `mariadb` BackupClass, `type: logical`, S3 only |
 | Physical backups (on demand + scheduled) | ✅ | `type: physical` (`mariadb-backup`), S3 only |
 | Restore — logical in place | ✅ | `SyncRestore` → operator `Restore` |
-| Restore — new Instance from backup | ⚠️ | physical ✅; **logical source silently ignored** ([#93]) |
+| Restore — new Instance from backup | ✅ | logical and physical via `spec.dataSource` ([#93]); in-place restores only from the Instance's own backups |
 | PITR | ✅ | replication topology only (operator limitation, [#114]) |
 | Maintenance gating / provider upgrades | ❌ | [#95] |
 | Instance deletion cleanup | ⚠️ | PVCs are orphaned ([#96]); backup data never purged ([#100]) |
@@ -66,8 +66,8 @@ Must be closed before the pre-alpha banner can be removed. Ordered by risk.
 
 | # | Item | Why it blocks production |
 |---|---|---|
-| [#93] | Seeding from a **logical** backup via `dataSource` | Instance comes up empty — silent data loss on restore |
-| [#94] | Replication **scale-out** | Operator needs `replica.bootstrapFrom`; advertised capability broken |
+| ~~[#93]~~ | ✅ Seeding from a **logical** backup via `dataSource` | Fixed in #117 |
+| ~~[#94]~~ | ✅ Replication **scale-out** | Provider-managed replica template staged in the backup storage |
 | [#95] | **Maintenance gating** + `CheckUpgrade` | `autoUpdateDataPlane: true` rolls every cluster on provider upgrade without approval |
 | [#96] | **PVC lifecycle** on deletion | Orphaned volumes; same-name Instance reattaches stale datadir |
 | [#97] | **Validate** unsafe updates | Version downgrade, storage shrink (Instance stuck), storageClass change (ignored) |
@@ -112,7 +112,7 @@ Must be closed before the pre-alpha banner can be removed. Ordered by risk.
 
 ## 5. Suggested delivery order
 
-1. Correctness bugs: #93, #94, #96, #97.
+1. Correctness bugs: #96, #97 (#93, #94 done).
 2. Safety for upgrades: #95, then #78 / #99 test coverage.
 3. Self-healing: #98.
 4. Day-2: #100, #101, #103 + #92, #102, #104.

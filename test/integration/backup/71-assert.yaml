@@ -1,0 +1,17 @@
+# The restored cluster comes up Ready and reports the initial seeding as done.
+# The DataSourceReady condition is selected by type (chainsaw matches arrays
+# positionally, so a bare list element would be compared against conditions[0]).
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: logical-restored
+status:
+  phase: Ready
+  (conditions[?type == 'DataSourceReady']):
+    - status: "True"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: logical-restored-conn
+(base64_decode(data.password) != ''): true

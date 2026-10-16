@@ -1,0 +1,17 @@
+# On-demand logical (mariadb-dump) backup of the source Instance to the
+# SeaweedFS storage.
+apiVersion: backup.openeverest.io/v1alpha1
+kind: Backup
+metadata:
+  name: logical-backup
+spec:
+  origin:
+    type: Instance
+    instanceRef:
+      name: physical-source
+  classRef:
+    name: mariadb
+  storageRef:
+    name: seaweedfs-s3
+  parameters:
+    type: logical

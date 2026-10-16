@@ -300,7 +300,7 @@ func TestResolvePointInTimeBootstrapFrom(t *testing.T) {
 		in := instanceSeededFromPITR(backupv1alpha1.RecoveryTargetDate, &date)
 		c := newPITRContext(t, in, sourcePITR)
 
-		bootstrap, sourceInstance, err := resolvePhysicalBootstrapFrom(c)
+		bootstrap, sourceInstance, err := resolveBootstrapFrom(c)
 		require.NoError(t, err)
 		require.NotNil(t, bootstrap)
 		assert.Equal(t, "src", sourceInstance)
@@ -315,7 +315,7 @@ func TestResolvePointInTimeBootstrapFrom(t *testing.T) {
 		in := instanceSeededFromPITR(backupv1alpha1.RecoveryTargetLatest, nil)
 		c := newPITRContext(t, in, sourcePITR)
 
-		bootstrap, _, err := resolvePhysicalBootstrapFrom(c)
+		bootstrap, _, err := resolveBootstrapFrom(c)
 		require.NoError(t, err)
 		require.NotNil(t, bootstrap)
 		assert.Nil(t, bootstrap.TargetRecoveryTime)
@@ -325,7 +325,7 @@ func TestResolvePointInTimeBootstrapFrom(t *testing.T) {
 		in := instanceSeededFromPITR(backupv1alpha1.RecoveryTargetLatest, nil)
 		c := newPITRContext(t, in)
 
-		_, _, err := resolvePhysicalBootstrapFrom(c)
+		_, _, err := resolveBootstrapFrom(c)
 		require.Error(t, err)
 		var waitErr *controller.WaitError
 		assert.ErrorAs(t, err, &waitErr)
@@ -336,7 +336,7 @@ func TestResolvePointInTimeBootstrapFrom(t *testing.T) {
 		in.Spec.DataSource.PointInTime.Source.InstanceRef = nil
 		c := newPITRContext(t, in, sourcePITR)
 
-		_, _, err := resolvePhysicalBootstrapFrom(c)
+		_, _, err := resolveBootstrapFrom(c)
 		require.Error(t, err)
 		var dsErr *controller.DataSourceConfigError
 		assert.ErrorAs(t, err, &dsErr)
@@ -346,7 +346,7 @@ func TestResolvePointInTimeBootstrapFrom(t *testing.T) {
 		in := instanceSeededFromPITR(backupv1alpha1.RecoveryTargetDate, nil)
 		c := newPITRContext(t, in, sourcePITR)
 
-		_, _, err := resolvePhysicalBootstrapFrom(c)
+		_, _, err := resolveBootstrapFrom(c)
 		require.Error(t, err)
 		var dsErr *controller.DataSourceConfigError
 		assert.ErrorAs(t, err, &dsErr)
@@ -439,3 +439,102 @@ func TestSyncRestoreRejectsPointInTimeInPlace(t *testing.T) {
 	assert.True(t, controller.IsNotFound(c.Get(&mariadbv1alpha1.Restore{}, "restore-pit")))
 }
 
+
+func TestValidatePointInTimeDataSource(t *testing.T) {
+	t.Run("rejects recovery into a standalone instance", func(t *testing.T) {
+		in := instanceSeededFromPITR(backupv1alpha1.RecoveryTargetLatest, nil)
+		err := validatePointInTimeDataSource(newPITRContext(t, in))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "replication")
+	})
+
+	t.Run("allows recovery into a replication instance", func(t *testing.T) {
+		in := instanceSeededFromPITR(backupv1alpha1.RecoveryTargetLatest, nil)
+		in.Spec.Topology = &corev1alpha1.TopologySpec{Type: "replication"}
+		assert.NoError(t, validatePointInTimeDataSource(newPITRContext(t, in)))
+	})
+
+	t.Run("keeps already recovered instances valid", func(t *testing.T) {
+		in := instanceSeededFromPITR(backupv1alpha1.RecoveryTargetLatest, nil)
+		existing := &mariadbv1alpha1.MariaDB{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "ns"}}
+		assert.NoError(t, validatePointInTimeDataSource(newPITRContext(t, in, existing)))
+	})
+
+	t.Run("ignores backup data sources", func(t *testing.T) {
+		assert.NoError(t, validatePointInTimeDataSource(newPITRContext(t, instanceSeededFrom("backup-1"))))
+	})
+}
+
+func TestSyncDataSourceStatusPointInTime(t *testing.T) {
+	pitrMariaDB := func(conditions ...metav1.Condition) *mariadbv1alpha1.MariaDB {
+		for i := range conditions {
+			conditions[i].LastTransitionTime = metav1.Now()
+		}
+		return &mariadbv1alpha1.MariaDB{
+			ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "ns"},
+			Spec: mariadbv1alpha1.MariaDBSpec{
+				BootstrapFrom: &mariadbv1alpha1.BootstrapFrom{
+					PointInTimeRecoveryRef: &mariadbv1alpha1.LocalObjectReference{Name: pitrCRName("src")},
+					BackupContentType:      mariadbv1alpha1.BackupContentTypePhysical,
+				},
+			},
+			Status: mariadbv1alpha1.MariaDBStatus{Conditions: conditions},
+		}
+	}
+	replayed := func(status metav1.ConditionStatus, reason, msg string) metav1.Condition {
+		return metav1.Condition{
+			Type: mariadbv1alpha1.ConditionTypeBinlogsReplayed, Status: status, Reason: reason, Message: msg,
+		}
+	}
+
+	tests := []struct {
+		name  string
+		mdb   *mariadbv1alpha1.MariaDB
+		done  bool
+		state controller.DataSourceState
+	}{
+		{
+			name:  "ready base backup without replay is still restoring",
+			mdb:   pitrMariaDB(mariadbReady),
+			state: controller.DataSourceStateRestoring,
+		},
+		{
+			name: "replaying binlogs is restoring",
+			mdb: pitrMariaDB(replayed(metav1.ConditionFalse,
+				mariadbv1alpha1.ConditionReasonReplayBinlogs, "Replaying binlogs")),
+			state: controller.DataSourceStateRestoring,
+		},
+		{
+			name: "replayed and ready succeeds",
+			mdb: pitrMariaDB(mariadbReady, replayed(metav1.ConditionTrue,
+				mariadbv1alpha1.ConditionReasonReplayBinlogs, "Replayed binlogs")),
+			done:  true,
+			state: controller.DataSourceStateSucceeded,
+		},
+		{
+			name: "skipped replay and ready succeeds",
+			mdb: pitrMariaDB(mariadbReady, replayed(metav1.ConditionTrue,
+				mariadbv1alpha1.ConditionReasonReplayBinlogsSkipped, "Skipped")),
+			done:  true,
+			state: controller.DataSourceStateSucceeded,
+		},
+		{
+			name: "replay error fails",
+			mdb: pitrMariaDB(replayed(metav1.ConditionFalse,
+				mariadbv1alpha1.ConditionReasonReplayBinlogsError, "Invalid binary log timeline")),
+			done:  true,
+			state: controller.DataSourceStateFailed,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := instanceSeededFromPITR(backupv1alpha1.RecoveryTargetLatest, nil)
+			c := newPITRContext(t, in, tt.mdb)
+			require.NoError(t, syncDataSourceStatus(c))
+			got := c.GetDataSourceStatus()
+			require.NotNil(t, got)
+			assert.Equal(t, tt.done, got.Done)
+			assert.Equal(t, tt.state, got.State)
+		})
+	}
+}
