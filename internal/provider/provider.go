@@ -87,6 +87,9 @@ func (p *MariaDBProvider) Sync(c *controller.Context) error {
 	if err := SyncMaxScale(c); err != nil {
 		return err
 	}
+	if err := SyncVMServiceScrape(c); err != nil {
+		return err
+	}
 	if err := SyncScheduledBackups(c); err != nil {
 		return err
 	}

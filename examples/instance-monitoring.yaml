@@ -43,3 +43,13 @@ spec:
           # Optional scrape tuning.
           interval: 30s
           scrapeTimeout: 10s
+        # Optional: also create a VMServiceScrape for the VictoriaMetrics
+        # operator. Requires the VMServiceScrape CRD (operator.victoriametrics.com)
+        # and a VMAgent that selects it. It takes over the VMServiceScrape the
+        # VictoriaMetrics Prometheus converter creates from the ServiceMonitor,
+        # so the exporter is scraped once.
+        victoriaMetrics:
+          enabled: true
+          # Optional; defaults to the ServiceMonitor settings above.
+          # interval: 30s
+          # scrapeTimeout: 10s
