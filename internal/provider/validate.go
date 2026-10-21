@@ -134,13 +134,20 @@ func validatePITR(c *controller.Context) error {
 }
 
 // validateMonitoring ensures the monitoring component parameters are decodable
-// and, when metrics are enabled, that an exporter image can be resolved.
+// and, when metrics are enabled, that an exporter image can be resolved. A
+// VMServiceScrape requires metrics and the VMServiceScrape CRD.
 func validateMonitoring(c *controller.Context) error {
 	params, err := monitoringParams(c)
 	if err != nil {
 		return err
 	}
-	if params == nil || !params.Enabled {
+	if params == nil {
+		return nil
+	}
+	if params.VictoriaMetrics.Enabled && !params.Enabled {
+		return fmt.Errorf("victoriaMetrics requires metrics to be enabled")
+	}
+	if !params.Enabled {
 		return nil
 	}
 
@@ -150,6 +157,16 @@ func validateMonitoring(c *controller.Context) error {
 	}
 	if image == "" {
 		return fmt.Errorf("unable to resolve a mysqld-exporter image for the monitoring component")
+	}
+
+	if params.VictoriaMetrics.Enabled {
+		installed, err := vmServiceScrapeCRDInstalled(c)
+		if err != nil {
+			return err
+		}
+		if !installed {
+			return fmt.Errorf("victoriaMetrics requires the VMServiceScrape CRD (operator.victoriametrics.com) to be installed")
+		}
 	}
 	return nil
 }

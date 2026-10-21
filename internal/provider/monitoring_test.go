@@ -17,12 +17,22 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
+	mariadbv1alpha1 "github.com/mariadb-operator/mariadb-operator/v26/api/v1alpha1"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/openeverest/openeverest/v2/api/core/v1alpha1"
@@ -190,3 +200,197 @@ func TestBuildMetrics_EnabledAsString(t *testing.T) {
 	}
 }
 
+
+// newVictoriaMetricsContext builds a controller.Context for an Instance with
+// the given monitoring parameters and a fake client whose REST mapper serves
+// the VMServiceScrape CRD when crdInstalled is set.
+func newVictoriaMetricsContext(t *testing.T, params string, crdInstalled bool, objs ...client.Object) *controller.Context {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, mariadbv1alpha1.AddToScheme(scheme))
+
+	mapper := meta.NewDefaultRESTMapper(nil)
+	for gvk := range scheme.AllKnownTypes() {
+		mapper.Add(gvk, meta.RESTScopeNamespace)
+	}
+	if crdInstalled {
+		mapper.Add(vmServiceScrapeGVK, meta.RESTScopeNamespace)
+	}
+
+	instance := &corev1alpha1.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default", UID: "uid"},
+		Spec: corev1alpha1.InstanceSpec{
+			Components: map[string]corev1alpha1.ComponentSpec{
+				common.ComponentMonitoring: {
+					Type:       common.ComponentMonitoring,
+					Image:      "exporter:test",
+					Parameters: &runtime.RawExtension{Raw: []byte(params)},
+				},
+			},
+		},
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRESTMapper(mapper).
+		WithObjects(append([]client.Object{instance}, objs...)...).
+		Build()
+	return controller.NewContext(context.Background(), cl, instance, common.ProviderName)
+}
+
+// metricsMariaDB returns a 3-replica MariaDB with metrics enabled whose
+// primary is the Pod with the given index.
+func metricsMariaDB(primary int) *mariadbv1alpha1.MariaDB {
+	return &mariadbv1alpha1.MariaDB{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Spec: mariadbv1alpha1.MariaDBSpec{
+			Replicas: 3,
+			Port:     3306,
+			Metrics: &mariadbv1alpha1.MariadbMetrics{
+				Enabled:        true,
+				ServiceMonitor: mariadbv1alpha1.ServiceMonitor{Interval: "10s"},
+			},
+		},
+		Status: mariadbv1alpha1.MariaDBStatus{CurrentPrimaryPodIndex: ptr.To(primary)},
+	}
+}
+
+func getVMServiceScrape(t *testing.T, c *controller.Context) *unstructured.Unstructured {
+	t.Helper()
+	vmss := newVMServiceScrape()
+	require.NoError(t, c.Get(vmss, "test-metrics"))
+	return vmss
+}
+
+func TestDesiredVMServiceScrape(t *testing.T) {
+	c := newVictoriaMetricsContext(t, `{"enabled":true,"victoriaMetrics":{"enabled":true}}`, true)
+	vmss, err := desiredVMServiceScrape(c, metricsMariaDB(1), components.VictoriaMetricsParameters{Interval: "30s"})
+	require.NoError(t, err)
+
+	assert.Equal(t, "test-metrics", vmss.GetName())
+	assert.Equal(t, "enabled", vmss.GetAnnotations()[vmIgnorePrometheusUpdatesAnnotation])
+	assert.Equal(t, "everest", vmss.GetLabels()["app.kubernetes.io/managed-by"])
+
+	matchLabels, _, _ := unstructured.NestedStringMap(vmss.Object, "spec", "selector", "matchLabels")
+	assert.Equal(t, map[string]string{
+		"app.kubernetes.io/name":     "exporter",
+		"app.kubernetes.io/instance": "test-metrics",
+	}, matchLabels)
+	namespaces, _, _ := unstructured.NestedStringSlice(vmss.Object, "spec", "namespaceSelector", "matchNames")
+	assert.Equal(t, []string{"default"}, namespaces)
+
+	endpoints, _, _ := unstructured.NestedSlice(vmss.Object, "spec", "endpoints")
+	require.Len(t, endpoints, 3)
+	for i, raw := range endpoints {
+		endpoint := raw.(map[string]any)
+		assert.Equal(t, "metrics", endpoint["port"])
+		assert.Equal(t, "/probe", endpoint["path"])
+		assert.Equal(t, "30s", endpoint["interval"], "the VictoriaMetrics interval overrides the ServiceMonitor one")
+		assert.NotContains(t, endpoint, "scrapeTimeout")
+		target := fmt.Sprintf("test-%d.test-internal.default.svc.cluster.local:3306", i)
+		assert.Equal(t, map[string]any{"target": []any{target}}, endpoint["params"])
+
+		role := "replica"
+		if i == 1 {
+			role = "primary"
+		}
+		assert.Equal(t, []any{map[string]any{
+			"action": "replace", "replacement": role, "targetLabel": "role",
+		}}, endpoint["relabelConfigs"])
+		metricRelabels := endpoint["metricRelabelConfigs"].([]any)
+		require.Len(t, metricRelabels, 2)
+		assert.Equal(t, map[string]any{
+			"action": "replace", "replacement": strings.Split(target, ":")[0],
+			"sourceLabels": []any{"instance"}, "targetLabel": "instance",
+		}, metricRelabels[0])
+	}
+}
+
+func TestSyncVMServiceScrape_CreatesAndTearsDown(t *testing.T) {
+	c := newVictoriaMetricsContext(t, `{"enabled":true,"victoriaMetrics":{"enabled":"true"}}`, true, metricsMariaDB(0))
+	require.NoError(t, SyncVMServiceScrape(c))
+
+	vmss := getVMServiceScrape(t, c)
+	assert.True(t, metav1.IsControlledBy(vmss, c.Instance()))
+	endpoints, _, _ := unstructured.NestedSlice(vmss.Object, "spec", "endpoints")
+	assert.Len(t, endpoints, 3)
+	assert.Equal(t, "10s", endpoints[0].(map[string]any)["interval"], "defaults to the ServiceMonitor interval")
+
+	c.Instance().Spec.Components[common.ComponentMonitoring] = corev1alpha1.ComponentSpec{
+		Type:       common.ComponentMonitoring,
+		Parameters: &runtime.RawExtension{Raw: []byte(`{"enabled":true}`)},
+	}
+	require.NoError(t, SyncVMServiceScrape(c))
+	err := c.Get(newVMServiceScrape(), "test-metrics")
+	assert.True(t, apierrors.IsNotFound(err), "expected VMServiceScrape to be deleted, got %v", err)
+}
+
+// A VMServiceScrape converted from the operator's ServiceMonitor is taken over,
+// including when the converter made the ServiceMonitor its controller.
+func TestSyncVMServiceScrape_AdoptsConverted(t *testing.T) {
+	converted := newVMServiceScrape()
+	converted.SetName("test-metrics")
+	converted.SetNamespace("default")
+	converted.SetLabels(map[string]string{"release": "kube-prometheus-stack"})
+	converted.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: "monitoring.coreos.com/v1", Kind: "ServiceMonitor", Name: "test-metrics",
+		UID: "sm-uid", Controller: ptr.To(true),
+	}})
+	converted.Object["spec"] = map[string]any{"endpoints": []any{map[string]any{"port": "metrics"}}}
+
+	c := newVictoriaMetricsContext(t, `{"enabled":true,"victoriaMetrics":{"enabled":true}}`, true, metricsMariaDB(0), converted)
+	require.NoError(t, SyncVMServiceScrape(c))
+
+	vmss := getVMServiceScrape(t, c)
+	assert.True(t, metav1.IsControlledBy(vmss, c.Instance()))
+	require.Len(t, vmss.GetOwnerReferences(), 1, "the converter's controller reference is dropped")
+	assert.Equal(t, "enabled", vmss.GetAnnotations()[vmIgnorePrometheusUpdatesAnnotation])
+	endpoints, _, _ := unstructured.NestedSlice(vmss.Object, "spec", "endpoints")
+	assert.Len(t, endpoints, 3)
+}
+
+func TestSyncVMServiceScrape_TeardownLeavesForeign(t *testing.T) {
+	converted := newVMServiceScrape()
+	converted.SetName("test-metrics")
+	converted.SetNamespace("default")
+
+	c := newVictoriaMetricsContext(t, `{"enabled":true}`, true, metricsMariaDB(0), converted)
+	require.NoError(t, SyncVMServiceScrape(c))
+	require.NoError(t, c.Get(newVMServiceScrape(), "test-metrics"), "a VMServiceScrape the provider does not control is kept")
+
+	// Without the CRD there is nothing to tear down.
+	c = newVictoriaMetricsContext(t, `{"enabled":true}`, false)
+	require.NoError(t, SyncVMServiceScrape(c))
+}
+
+func TestValidateMonitoring_VictoriaMetrics(t *testing.T) {
+	tests := []struct {
+		name         string
+		params       string
+		crdInstalled bool
+		wantErr      string
+	}{
+		{name: "metrics only", params: `{"enabled":true}`},
+		{name: "enabled with CRD", params: `{"enabled":true,"victoriaMetrics":{"enabled":true}}`, crdInstalled: true},
+		{
+			name:    "without metrics",
+			params:  `{"victoriaMetrics":{"enabled":true}}`,
+			wantErr: "requires metrics to be enabled",
+		},
+		{
+			name:    "without CRD",
+			params:  `{"enabled":true,"victoriaMetrics":{"enabled":true}}`,
+			wantErr: "requires the VMServiceScrape CRD",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateMonitoring(newVictoriaMetricsContext(t, tt.params, tt.crdInstalled))
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}

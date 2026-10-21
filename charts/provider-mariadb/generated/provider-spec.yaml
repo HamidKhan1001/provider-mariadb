@@ -60,6 +60,15 @@ spec:
                 scrapeTimeout:
                   type: string
               type: object
+            victoriaMetrics:
+              properties:
+                enabled:
+                  type: boolean
+                interval:
+                  type: string
+                scrapeTimeout:
+                  type: string
+              type: object
           type: object
       type: mysqld-exporter
     proxy:
@@ -254,12 +263,21 @@ spec:
             enabled:
               fieldParams:
                 defaultValue: false
+                helperText: Deploys the metrics exporter and a Prometheus ServiceMonitor. Requires the Prometheus Operator CRDs.
                 label: Enable metrics
               path: spec.components.monitoring.parameters.enabled
               uiType: toggle
+            victoriaMetrics:
+              fieldParams:
+                defaultValue: false
+                helperText: Also creates a VMServiceScrape for the VictoriaMetrics operator. Requires metrics to be enabled.
+                label: VictoriaMetrics
+              path: spec.components.monitoring.parameters.victoriaMetrics.enabled
+              uiType: toggle
           componentsOrder:
             - enabled
-          description: Expose database metrics and integrate them with a Prometheus stack.
+            - victoriaMetrics
+          description: Expose database metrics and integrate them with a Prometheus or VictoriaMetrics stack.
           label: Monitoring
         proxy:
           components:
@@ -491,12 +509,21 @@ spec:
             enabled:
               fieldParams:
                 defaultValue: false
+                helperText: Deploys the metrics exporter and a Prometheus ServiceMonitor. Requires the Prometheus Operator CRDs.
                 label: Enable metrics
               path: spec.components.monitoring.parameters.enabled
               uiType: toggle
+            victoriaMetrics:
+              fieldParams:
+                defaultValue: false
+                helperText: Also creates a VMServiceScrape for the VictoriaMetrics operator. Requires metrics to be enabled.
+                label: VictoriaMetrics
+              path: spec.components.monitoring.parameters.victoriaMetrics.enabled
+              uiType: toggle
           componentsOrder:
             - enabled
-          description: Expose database metrics and integrate them with a Prometheus stack.
+            - victoriaMetrics
+          description: Expose database metrics and integrate them with a Prometheus or VictoriaMetrics stack.
           label: Monitoring
         proxy:
           components:
@@ -717,12 +744,21 @@ spec:
             enabled:
               fieldParams:
                 defaultValue: false
+                helperText: Deploys the metrics exporter and a Prometheus ServiceMonitor. Requires the Prometheus Operator CRDs.
                 label: Enable metrics
               path: spec.components.monitoring.parameters.enabled
               uiType: toggle
+            victoriaMetrics:
+              fieldParams:
+                defaultValue: false
+                helperText: Also creates a VMServiceScrape for the VictoriaMetrics operator. Requires metrics to be enabled.
+                label: VictoriaMetrics
+              path: spec.components.monitoring.parameters.victoriaMetrics.enabled
+              uiType: toggle
           componentsOrder:
             - enabled
-          description: Expose database metrics and integrate them with a Prometheus stack.
+            - victoriaMetrics
+          description: Expose database metrics and integrate them with a Prometheus or VictoriaMetrics stack.
           label: Monitoring
         resources:
           components:

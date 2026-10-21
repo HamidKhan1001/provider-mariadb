@@ -58,23 +58,24 @@ type TLSParameters struct {
 // MonitoringParameters defines parameters for the monitoring component.
 //
 // The monitoring component maps onto the mariadb-operator's spec.metrics: it
-// deploys a mysqld-exporter sidecar and, via ServiceMonitor, integrates with a
-// Prometheus Operator stack. Both are opt-in and default to off.
+// deploys a mysqld-exporter and makes it discoverable by a Prometheus Operator
+// stack (ServiceMonitor) and/or a VictoriaMetrics operator stack
+// (VMServiceScrape). Metrics are opt-in and default to off.
 type MonitoringParameters struct {
 	// Enabled turns on the MariaDB metrics exporter (mysqld-exporter). When
-	// false or unset, no exporter is deployed and no Prometheus objects are
+	// false or unset, no exporter is deployed and no scrape objects are
 	// created. Defaults to false.
 	// +optional
 	Enabled FlexBool `json:"enabled,omitempty"`
 	// ServiceMonitor controls the creation of a Prometheus Operator
 	// ServiceMonitor object that scrapes the exporter. Creating it requires the
 	// ServiceMonitor CRD (monitoring.coreos.com) to be installed in the cluster.
-	//
-	// Note: the underlying mariadb-operator currently couples exporter and
-	// ServiceMonitor reconciliation, so a ServiceMonitor is always created while
-	// metrics are enabled, regardless of ServiceMonitor.Enabled.
 	// +optional
 	ServiceMonitor ServiceMonitorParameters `json:"serviceMonitor,omitempty"`
+	// VictoriaMetrics controls the creation of a VictoriaMetrics operator
+	// VMServiceScrape object that scrapes the exporter.
+	// +optional
+	VictoriaMetrics VictoriaMetricsParameters `json:"victoriaMetrics,omitempty"`
 }
 
 // ServiceMonitorParameters configures the Prometheus ServiceMonitor object
@@ -82,10 +83,11 @@ type MonitoringParameters struct {
 // Prometheus apply sensible defaults when they are unset.
 type ServiceMonitorParameters struct {
 	// Enabled controls whether a Prometheus ServiceMonitor is created for the
-	// exporter. Defaults to false. It is automatically enabled while metrics are
-	// enabled, since the mariadb-operator reconciles the two together.
+	// exporter. Defaults to true while metrics are enabled. The current
+	// mariadb-operator always creates the ServiceMonitor, so it cannot be set
+	// to false yet.
 	// +optional
-	Enabled FlexBool `json:"enabled,omitempty"`
+	Enabled *FlexBool `json:"enabled,omitempty"`
 	// PrometheusRelease is the value of the `release` label added to the
 	// ServiceMonitor so a Prometheus instance selecting on it picks the target up.
 	// +optional
@@ -97,6 +99,24 @@ type ServiceMonitorParameters struct {
 	// +optional
 	Interval string `json:"interval,omitempty"`
 	// ScrapeTimeout is the timeout for a single scrape (e.g. "10s").
+	// +optional
+	ScrapeTimeout string `json:"scrapeTimeout,omitempty"`
+}
+
+// VictoriaMetricsParameters configures the VMServiceScrape object created for
+// the exporter. It requires the VMServiceScrape CRD
+// (operator.victoriametrics.com) to be installed in the cluster.
+type VictoriaMetricsParameters struct {
+	// Enabled controls whether a VMServiceScrape is created for the exporter.
+	// Requires metrics to be enabled. Defaults to false.
+	// +optional
+	Enabled FlexBool `json:"enabled,omitempty"`
+	// Interval at which the exporter is scraped (e.g. "30s"). Defaults to the
+	// ServiceMonitor interval, or the VMAgent default when unset.
+	// +optional
+	Interval string `json:"interval,omitempty"`
+	// ScrapeTimeout is the timeout for a single scrape (e.g. "10s"). Defaults
+	// to the ServiceMonitor scrape timeout, or the VMAgent default when unset.
 	// +optional
 	ScrapeTimeout string `json:"scrapeTimeout,omitempty"`
 }
