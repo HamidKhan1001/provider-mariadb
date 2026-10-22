@@ -231,6 +231,13 @@ func desiredMariaDB(c *controller.Context) (*mariadbv1alpha1.MariaDB, error) {
 	)
 	// The operator adds these to the pod template only, never to the selectors.
 	mdb.Spec.PodMetadata = &mariadbv1alpha1.Metadata{Labels: c.PodLabels(common.ComponentEngine)}
+	// InheritMetadata, unlike PodMetadata, is copied onto every child resource
+	// the operator creates, including the metrics ServiceMonitor. That's what
+	// lets plugin-metrics find it: it matches on this instance label, not on
+	// anything pod-specific.
+	mdb.Spec.InheritMetadata = &mariadbv1alpha1.Metadata{
+		Labels: map[string]string{controller.InstanceLabel: c.Name()},
+	}
 	if galera {
 		mdb.Spec.Galera = &mariadbv1alpha1.Galera{Enabled: true}
 	}

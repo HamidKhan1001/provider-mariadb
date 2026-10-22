@@ -188,6 +188,20 @@ func TestSyncMariaDB_LabelsComponentPods(t *testing.T) {
 	assert.Equal(t, []string{common.ComponentEngine, common.ComponentMonitoring}, h.LabelledComponents())
 }
 
+// TestSyncMariaDB_InheritsInstanceLabelOntoChildResources covers openeverest/provider-mariadb#92:
+// plugin-metrics finds a Backup's ServiceMonitor by the instance label, but the
+// operator only copies InheritMetadata (not PodMetadata) onto resources like
+// the ServiceMonitor, so the label has to be set there specifically.
+func TestSyncMariaDB_InheritsInstanceLabelOntoChildResources(t *testing.T) {
+	h := newSyncHarness(t, "", nil)
+	require.NoError(t, SyncMariaDB(h.Context))
+
+	spec := h.lastSpec(t)
+	assert.Equal(t, map[string]any{"labels": map[string]any{
+		"core.openeverest.io/instance": "test",
+	}}, spec["inheritMetadata"])
+}
+
 func TestSyncMariaDB_KeepsDeclaringImmutableCreationFields(t *testing.T) {
 	existing := &mariadbv1alpha1.MariaDB{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
